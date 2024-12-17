@@ -28,7 +28,7 @@ from clu import platform
 import jax
 from ml_collections import config_flags
 import tensorflow as tf
-from simulation_research.diffusion import train
+from userdiffusion import train
 
 FLAGS = flags.FLAGS
 

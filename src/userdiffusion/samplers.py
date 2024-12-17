@@ -32,8 +32,7 @@ import numpy as np
 import scipy.integrate
 from tqdm.auto import tqdm
 
-from simulation_research.diffusion.diffusion import Diffusion
-from simulation_research.diffusion.diffusion import unsqueeze_like
+from userdiffusion.diffusion import Diffusion, unsqueeze_like
 
 # Function (x,t) -> x' such as scorefn or dynamics
 Fnxt2x = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]

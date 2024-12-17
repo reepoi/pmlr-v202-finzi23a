@@ -32,10 +32,7 @@ import ml_collections
 import numpy as np
 import tensorflow as tf
 
-from simulation_research.diffusion import diffusion
-from simulation_research.diffusion import ode_datasets
-from simulation_research.diffusion import samplers
-from simulation_research.diffusion import unet
+from userdiffusion import diffusion, ode_datasets, samplers, unet
 
 
 def train_and_evaluate(config, workdir):

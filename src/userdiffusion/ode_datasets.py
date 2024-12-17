@@ -29,8 +29,7 @@ from jax.sharding import PartitionSpec as P
 import numpy as np
 from tqdm.auto import tqdm
 
-from simulation_research.diffusion.animations import Animation
-from simulation_research.diffusion.animations import PendulumAnimation
+from userdiffusion.animations import Animation, PendulumAnimation
 
 
 class ODEDataset(object):

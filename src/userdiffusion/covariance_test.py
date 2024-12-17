@@ -19,9 +19,7 @@ from absl.testing import absltest
 import jax
 import jax.numpy as jnp
 
-from simulation_research.diffusion.diffusion import BrownianCovariance
-from simulation_research.diffusion.diffusion import PinkCovariance
-from simulation_research.diffusion.diffusion import WhiteCovariance
+from userdiffusion.diffusion import BrownianCovariance, PinkCovariance, WhiteCovariance
 
 
 class CovarianceTest(absltest.TestCase):

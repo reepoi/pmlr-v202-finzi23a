@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for diffusion_unet."""
+"""Tests for unet."""
 
 from absl.testing import absltest
 from jax import random
 import numpy as np
 
-from simulation_research.diffusion.unet import UNet
-from simulation_research.diffusion.unet import unet_64_config
+from userdiffusion.unet import UNet, unet_64_config
 
 
 class UnetTest(absltest.TestCase):

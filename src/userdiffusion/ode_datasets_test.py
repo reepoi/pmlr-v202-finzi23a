@@ -17,7 +17,7 @@
 
 from absl.testing import absltest
 
-from simulation_research.diffusion import ode_datasets
+from userdiffusion import ode_datasets
 
 
 class OdeDatasetsTest(absltest.TestCase):
