@@ -1,4 +1,10 @@
-# Event Conditioning for Dynamical Systems via Diffusion Models
+.. note::
+
+   *This is a fork of the official code.*
+   Find the official code `here <https://github.com/google-research/google-research/tree/9dda2b5e6503284eeb24e746d4103ed37019a80e/simulation_research/diffusion>`_.
+
+User-defined event sampling and uncertainty quantification in diffusion models for physical dynamical systems
+-------------------------------------------------------------------------------------------------------------
 
 *This is not an official Google product*
 
