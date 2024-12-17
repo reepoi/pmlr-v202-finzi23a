@@ -2,7 +2,7 @@
 name = "userdiffusion"
 version = "0.1.0"
 description = "M. A. Finzi, A. Boral, A. G. Wilson, F. Sha, and L. Zepeda-Nunez, “User-defined event sampling and uncertainty quantification in diffusion models for physical dynamical systems,” in Proceedings of the 40th international conference on machine learning, A. Krause, E. Brunskill, K. Cho, B. Engelhardt, S. Sabato, and J. Scarlett, Eds., in Proceedings of machine learning research, vol. 202. PMLR, Jul. 2023, pp. 10136–10152. [Online]. Available: https://proceedings.mlr.press/v202/finzi23a.html"
-readme = "README.md"
+readme = "README.rst"
 authors = [
 ]
 requires-python = ">=3.10"
