@@ -1,0 +1,23 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "python",
+            "request": "launch",
+            "name": "Unet test",
+            "program": "/root/workspace/GitHub/pmlr-v202-finzi23a/src/userdiffusion/unet_test.py",
+            "args": [
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "${input:gpu}"
+            }
+        }
+    ],
+    "inputs": [
+        {
+            "id": "gpu",
+            "type": "promptString",
+            "description": "Pick a GPU"
+        }
+    ]
+}
