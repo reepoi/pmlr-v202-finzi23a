@@ -4,8 +4,8 @@
         {
             "type": "python",
             "request": "launch",
-            "name": "Unet test",
-            "program": "/root/workspace/GitHub/pmlr-v202-finzi23a/src/userdiffusion/unet_test.py",
+            "name": "Launch main",
+            "program": "/root/workspace/GitHub/pmlr-v202-finzi23a/src/userdiffusion/main.py",
             "args": [
             ],
             "env": {

@@ -238,7 +238,7 @@ class FFN(nn.Module):
 
 
 class ConvBlock(nn.Module):
-  """Basic conv block.
+  """ResBlock: Basic conv block.
 
   There are two paths, the main conv path `h` and the shorcut path `s`.
 

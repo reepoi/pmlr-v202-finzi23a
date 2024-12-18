@@ -26,9 +26,9 @@ def get_config():
   """default config for diffusion model training."""
   return config(
       ds=4000,  #  size of the dataset
-      bs=500,  #  batch size
+      bs=500,  #  batch size, also number of test trajectories
       dataset='LorenzDataset',  # for options see ode_datasets_test.py
-      dataset_timesteps=60,
+      dataset_timesteps=60,  # trajectory length in timesteps
       seed=37,
       lr=1e-4,
       epochs=10000,

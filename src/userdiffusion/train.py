@@ -75,9 +75,9 @@ def train_and_evaluate(config, workdir):
   cond_fn = lambda z: (z[:, :3] if config.ic_conditioning else None)
 
   # save the config and the data_std (used for normalization)
-  with tf.Open(os.path.join(workdir, "config.pickle"), "wb") as f:
+  with tf.io.gfile.GFile(os.path.join(workdir, "config.pickle"), "wb") as f:
     pickle.dump(config, f)
-  with tf.io.gfile.Open(os.path.join(workdir, "data_std.pickle"), "wb") as f:
+  with tf.io.gfile.GFile(os.path.join(workdir, "data_std.pickle"), "wb") as f:
     pickle.dump(data_std, f)
   # setup checkpoint saving
   checkpoint_dir = os.path.join(workdir, "checkpoints")
