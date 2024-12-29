@@ -4,7 +4,7 @@ from omegaconf import OmegaConf
 from fixtures import init_hydra_cfg, engine
 from userdiffusion import cs
 
-from userdiffusion import datasets, ode_datasets
+from userdiffusion import datasets, ode_datasets as datasets_old
 
 
 @pytest.mark.parametrize('overrides', [
@@ -35,10 +35,9 @@ def test_datasets_equal(engine, overrides):
     with cs.orm.Session(engine) as session:
         cfg = cs.instantiate_and_insert_config(session, OmegaConf.to_container(cfg))
         ds = datasets.get_dataset(cfg.dataset, rng_seed=cfg.rng_seed)
-        ds_old = ode_datasets.get_dataset(cfg.dataset, rng_seed=cfg.rng_seed)
+        ds_old = datasets_old.get_dataset(cfg.dataset, rng_seed=cfg.rng_seed)
         assert len(ds) == len(ds_old)
         for i in range(len(ds)):
             assert (ds[i][0][0] == ds_old[i][0][0]).all()
             assert (ds[i][0][1] == ds_old[i][0][1]).all()
             assert (ds[i][1] == ds_old[i][1]).all()
-        print('end')
