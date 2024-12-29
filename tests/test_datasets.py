@@ -1,0 +1,44 @@
+import pytest
+from omegaconf import OmegaConf
+
+from fixtures import init_hydra_cfg, engine
+from userdiffusion import cs
+
+from userdiffusion import datasets, ode_datasets
+
+
+@pytest.mark.parametrize('overrides', [
+    ['+experiment=Lorenz', 'dataset.trajectory_count=20'],
+    ['+experiment=FitzHughNagumo', 'dataset.trajectory_count=20'],
+])
+def test_datasets_deterministic_with_rng_seed(engine, overrides):
+    cfg = init_hydra_cfg('config', overrides)
+    with cs.orm.Session(engine) as session:
+        cfg = cs.instantiate_and_insert_config(session, OmegaConf.to_container(cfg))
+        dss = []
+        for _ in range(2):
+            dss.append(datasets.get_dataset(cfg.dataset, rng_seed=cfg.rng_seed))
+        ds1, ds2 = dss
+        assert len(ds1) == len(ds2)
+        for i in range(len(ds1)):
+            assert (ds1[i][0][0] == ds2[i][0][0]).all()
+            assert (ds1[i][0][1] == ds2[i][0][1]).all()
+            assert (ds1[i][1] == ds2[i][1]).all()
+
+
+@pytest.mark.parametrize('overrides', [
+    ['+experiment=Lorenz', 'dataset.trajectory_count=20'],
+    ['+experiment=FitzHughNagumo', 'dataset.trajectory_count=20'],
+])
+def test_datasets_equal(engine, overrides):
+    cfg = init_hydra_cfg('config', overrides)
+    with cs.orm.Session(engine) as session:
+        cfg = cs.instantiate_and_insert_config(session, OmegaConf.to_container(cfg))
+        ds = datasets.get_dataset(cfg.dataset, rng_seed=cfg.rng_seed)
+        ds_old = ode_datasets.get_dataset(cfg.dataset, rng_seed=cfg.rng_seed)
+        assert len(ds) == len(ds_old)
+        for i in range(len(ds)):
+            assert (ds[i][0][0] == ds_old[i][0][0]).all()
+            assert (ds[i][0][1] == ds_old[i][0][1]).all()
+            assert (ds[i][1] == ds_old[i][1]).all()
+        print('end')

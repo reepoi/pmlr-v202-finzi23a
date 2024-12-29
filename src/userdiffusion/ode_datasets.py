@@ -29,6 +29,7 @@ from jax.sharding import PartitionSpec as P
 import numpy as np
 from tqdm.auto import tqdm
 
+from userdiffusion import cs
 from userdiffusion.animations import Animation, PendulumAnimation
 
 
@@ -61,7 +62,8 @@ class ODEDataset(object):
       N = 30,  # pylint: disable=invalid-name
       chunk_len = None,
       dt = 0.1,
-      integration_time = 30):
+      integration_time = 30,
+      rng=None):
     """Constructor for the ODE dataset.
 
     Args:
@@ -74,8 +76,12 @@ class ODEDataset(object):
           randomly sampled
     """
     super().__init__()
+    if rng is None:
+        rng = np.random.default_rng()
+    self.rng = rng
     self.Zs = self.generate_trajectory_data(N, dt, integration_time)  # pylint: disable=invalid-name
     T = np.asarray(jnp.arange(0, integration_time, dt))  # pylint: disable=invalid-name
+    # Taos: drop burn-in times
     self.T = self.T_long = T[T >= self.burnin_time]  # pylint: disable=invalid-name
     if chunk_len is not None:
       self.Zs = np.asarray(self.chunk_training_data(self.Zs, chunk_len))  # pytype: disable=wrong-arg-types  # jax-ndarray
@@ -92,6 +98,8 @@ class ODEDataset(object):
                 z0s,
                 ts,
                 tol = 1e-4):
+    # Taos: only used for `def animation`
+    # Animations use `rtol=1e-4`, whereas `def generate_trajectory_data` uses `rtol=1e-6`.
     dynamics = jit(self.dynamics)
     return odeint(dynamics, z0s, ts, rtol=tol)
 
@@ -105,6 +113,7 @@ class ODEDataset(object):
     bs = min(bs, trajectories)
     z_batches = []
     mesh = Mesh(mesh_utils.create_device_mesh((device_count(),)), ('data',))
+    # odeint_rtol
     integrate = jit(
         vmap(lambda z0, t: odeint(self.dynamics, z0, t, rtol=1e-6), (0, None),
              0))
@@ -112,10 +121,12 @@ class ODEDataset(object):
     # batched_dynamics = jit(vmap(self.dynamics, (0, None)))
     k = len(mesh.devices)
     with mesh:
+      # Taos: if trajectories is smaller than original batch size and k >= 2, then more than N trajectories will be generated.
       for _ in tqdm(range(0, trajectories, bs * k)):
         z0s = self.sample_initial_conditions(bs * k)
         ts = jnp.arange(0, integration_time, dt)
         new_zs = jintegrate(z0s, ts)
+        # Taos: drop burn-in time step values
         new_zs = new_zs[:, ts >= self.burnin_time]
         z_batches.append(new_zs)
         n_gen += bs
@@ -191,7 +202,7 @@ class LorenzDataset(ODEDataset):
     return zdot / scale
 
   def sample_initial_conditions(self, bs):
-    return np.random.randn(bs, 3)
+    return self.rng.standard_normal((bs, 3))
 
 
 class FitzHughDataset(ODEDataset):
@@ -221,7 +232,7 @@ class FitzHughDataset(ODEDataset):
     return jnp.concatenate([xdot, ydot]) * 5.
 
   def sample_initial_conditions(self, bs):
-    return np.random.randn(bs, 4) * .2
+    return self.rng.standard_normal((bs, 4)) * .2
 
 
 def unpack(z):
@@ -311,7 +322,7 @@ class SHO(HamiltonianDataset):
     return jnp.eye(1)
 
   def sample_initial_conditions(self, bs):  # pytype: disable=signature-mismatch  # jax-ndarray
-    return np.random.randn(bs, 2)
+    return self.rng.standard_normal((bs, 2))
 
 
 class NPendulum(HamiltonianDataset):
@@ -355,7 +366,20 @@ class NPendulum(HamiltonianDataset):
     return kinetic + potential
 
   def sample_initial_conditions(self, bs):  # pytype: disable=signature-mismatch  # jax-ndarray
-    z0 = np.random.randn(bs, 2 * self.n)
+    z0 = self.rng.standard_normal((bs, 2 * self.n))
     z0[:, self.n:] *= .2
     z0[:, -1] *= 1.5
     return z0
+
+
+def get_dataset(cfg, rng=None, rng_seed=None):
+  if rng is None:
+    rng = np.random.default_rng(rng_seed)
+  if isinstance(cfg, cs.DatasetLorenz):
+    return LorenzDataset(N=cfg.trajectory_count, rng=rng)
+  elif isinstance(cfg, cs.DatasetFitzHughNagumo):
+    return FitzHughDataset(N=cfg.trajectory_count, rng=rng)
+  elif isinstance(cfg, cs.DatasetPendulum):
+    return NPendulum(N=cfg.trajectory_count, rng=rng)
+  else:
+    raise ValueError(f'Unknown dataset: {cfg}')
