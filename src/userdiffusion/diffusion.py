@@ -268,6 +268,10 @@ class VarianceExploding(Diffusion):
   def sigma(cls, t):
     sigma_max = 300
     sigma_min = 1e-3  # 1e-6#1e-3
+    # Taos: similar to Eqn.(31) in
+    # Song et al. 2021, "Score-Based Generative Modeling through Stochastic Differential Equations"
+    # The difference is that here we subtract 1 in the sqrt.
+    # This appears to fix the discontinuity at 0 of Eqn.(31).
     return sigma_min * jnp.sqrt((sigma_max / sigma_min)**(2 * t) - 1)
 
   @classmethod
@@ -364,23 +368,28 @@ def train_diffusion(
             train = True,
             cond = None):
     """Score function with appropriate input and output scaling."""
-    # scaling is equivalent to that in https://arxiv.org/abs/2206.00364
+    # scaling is equivalent to that in Karras et al. https://arxiv.org/abs/2206.00364
     sigma, scale = unsqueeze_like(x, diffusion.sigma(t), diffusion.scale(t))
+    # Taos: Karras et al. $c_in$ and $s(t)$ of EDM.
     input_scale = 1 / jnp.sqrt(sigma**2 + (scale * data_std)**2)
     cond = cond / data_std if cond is not None else None
     out = model.apply(params, x=x * input_scale, t=t, train=train, cond=cond)
+    # Taos: Karras et al. the demonimator of $c_out$ of EDM; where is the numerator?
     return out / jnp.sqrt(sigma**2 + scale**2 * data_std**2)
 
   def loss(params, x, key):
     """Score matching MSE loss from Yang's Score-SDE paper."""
     key1, key2 = jax.random.split(key)
-    u0 = jax.random.uniform(key1)
     # Use lowvar grid time sampling from https://arxiv.org/pdf/2107.00630.pdf
+    # Appendix I
+    u0 = jax.random.uniform(key1)
     u = jnp.remainder(u0 + jnp.linspace(0, 1, x.shape[0]), 1)
     t = u * (diffusion.tmax - diffusion.tmin) + diffusion.tmin
+
     xt = diffusion.noise_input(x, t, key2)
     target_score = diffusion.noise_score(xt, x, t)
     # weighting from Yang Song's https://arxiv.org/abs/2011.13456
+    # Taos: this appears to be using the weighting from Eqn.(1) used for dicrete noise levels.
     weighting = unsqueeze_like(x, diffusion.sigma(t)**2)
     error = score(params, xt, t, cond=cond_fn(x)) - target_score
     return jnp.mean((diffusion.covsqrt.inverse(error)**2) * weighting)

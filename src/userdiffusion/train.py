@@ -56,7 +56,7 @@ def train_and_evaluate(config, workdir):
   # Construct the dataset
   timesteps = config.dataset_timesteps
   ds = getattr(ode_datasets, config.dataset)(N=config.ds + config.bs)
-  # Taos: why do they integrate to T=10 with dt=.1, then only keep the first `timesteps` values of the trajectory?
+  # Taos: why only keep the first `timesteps` values of the trajectory? just integrate to burn-in plus timesteps?
   trajectories = ds.Zs[config.bs:, :timesteps]
   test_x = ds.Zs[:config.bs, :timesteps]
   data_std = trajectories.std()
