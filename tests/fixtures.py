@@ -1,7 +1,7 @@
 import pytest
 import hydra
 
-from userdiffusion import cs
+from userfm import cs
 
 @pytest.fixture
 def engine():

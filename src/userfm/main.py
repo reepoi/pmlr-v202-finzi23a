@@ -12,10 +12,7 @@ import clu.checkpoint
 import clu.platform
 
 from userdiffusion import unet, samplers
-
-import cs
-import datasets
-import flow_matching
+from userfm import cs, datasets, flow_matching
 
 
 log = logging.getLogger(__name__)

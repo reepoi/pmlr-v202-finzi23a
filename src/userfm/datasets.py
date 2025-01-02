@@ -30,7 +30,7 @@ from jax.sharding import PartitionSpec as P
 import numpy as np
 from tqdm.auto import tqdm
 
-import cs
+from userfm import cs
 from userdiffusion.animations import Animation, PendulumAnimation
 
 
