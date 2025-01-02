@@ -7,6 +7,22 @@
             "name": "Launch main",
             "program": "/root/workspace/GitHub/pmlr-v202-finzi23a/src/userdiffusion/main.py",
             "args": [
+                "--config=/root/workspace/GitHub/pmlr-v202-finzi23a/src/userdiffusion/config.py",
+                "--config.dataset=LorenzDataset",
+                "--workdir=/root/workspace/out/diffusion-dynamics/pmlr-v202-finzi23a/runs/junk"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "${input:gpu}"
+            }
+        },
+        {
+            "type": "python",
+            "request": "launch",
+            "name": "Launch main flow matching",
+            "program": "/root/workspace/GitHub/pmlr-v202-finzi23a/src/userfm/main.py",
+            "args": [
+                "dataset=DatasetLorenz",
+                "model=ModelFlowMatching"
             ],
             "env": {
                 "CUDA_VISIBLE_DEVICES": "${input:gpu}"

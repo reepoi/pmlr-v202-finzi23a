@@ -130,21 +130,53 @@ class Model(CfgWithTable):
         omegaconf_ignore=True,
     ))
 
+    epochs: int = field(default=10_000, metadata=dict(sa=ColumnRequired(sa.Integer)))
+    learning_rate: float = field(default=1e-4, metadata=dict(sa=ColumnRequired(sa.Double)))
+
+
+
+class ModelDiffusion(Model):
+    __tablename__ = __qualname__
+    __mapper_args__ = dict(
+        polymorphic_on='sa_inheritance',
+        polymorphic_identity=__tablename__,
+    )
+    _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
+
+    id: int = field(init=False, metadata=dict(
+        sa=sa.Column(sa.ForeignKey(f'{Model.__name__}.id'), primary_key=True),
+        omegaconf_ignore=True,
+    ))
+
+
+class ModelFlowMatching(Model):
+    __tablename__ = __qualname__
+    __mapper_args__ = dict(
+        polymorphic_on='sa_inheritance',
+        polymorphic_identity=__tablename__,
+    )
+    _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
+
+    id: int = field(init=False, metadata=dict(
+        sa=sa.Column(sa.ForeignKey(f'{Model.__name__}.id'), primary_key=True),
+        omegaconf_ignore=True,
+    ))
+
 
 class Config(CfgWithTable):
     __tablename__ = __qualname__
     __table_args__ = tuple()
     _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
     defaults: typing.List[typing.Any] = field(repr=False, default_factory=lambda: [
-        dict(dataset=DatasetLorenz.__name__),
-        dict(model=Model.__name__),
+        dict(dataset=omegaconf.MISSING),
+        dict(model=omegaconf.MISSING),
         '_self_'
     ])
 
     root_dir: str = field(default=str(DIR_ROOT.resolve()))
     src_dir: str = field(default=str(DIR_SRC.resolve()))
     # data_dir: str = field(default=str(DIR_DATA.resolve()))
-    out_dir: str = field(default=str((DIR_ROOT/'..'/'..'/'out'/'pmlr-v202-finzi23a').resolve()))
+    out_dir: str = field(default=str((DIR_ROOT/'..'/'..'/'out'/'diffusion-dynamics'/'pmlr-v202-finzi23a').resolve()))
     prediction_filename: str = field(default='prediction.pt')
     device: str = field(default='cuda')
 
@@ -156,15 +188,9 @@ class Config(CfgWithTable):
         sa=ColumnRequired(sa.String(8), index=True, unique=True),
         omegaconf_ignore=True
     ))
-    rng_seed: int = field(default=42, metadata=dict(sa=sa.Column(sa.Integer, nullable=False)))
-    fit: bool = field(default=True, metadata=dict(sa=sa.Column(sa.Boolean, nullable=False)))
-    predict: bool = field(default=False, metadata=dict(sa=sa.Column(sa.Boolean, nullable=False)))
-
-    # trainer_id: int = field(init=False, repr=False, metadata=dict(
-    #     sa=sa.Column(Trainer.__name__, sa.ForeignKey(f'{Trainer.__name__}.id'), nullable=False),
-    #     omegaconf_ignore=True,
-    # ))
-    # trainer: Trainer = field(default_factory=Trainer, metadata=dict(sa=orm.relationship(Trainer.__name__)))
+    rng_seed: int = field(default=42, metadata=dict(sa=ColumnRequired(sa.Integer)))
+    fit: bool = field(default=True, metadata=dict(sa=ColumnRequired(sa.Boolean)))
+    predict: bool = field(default=False, metadata=dict(sa=ColumnRequired(sa.Boolean)))
 
     model_id: int = field(init=False, repr=False, metadata=dict(
         sa=sa.Column(Model.__name__, sa.ForeignKey(f'{Model.__name__}.id'), nullable=False),
@@ -198,7 +224,8 @@ def generate_random_string_id(mapper, connection, target):
 cs = hydra.core.config_store.ConfigStore.instance()
 cs.store(group=Config.dataset.key, name=DatasetLorenz.__name__, node=DatasetLorenz)
 cs.store(group=Config.dataset.key, name=DatasetFitzHughNagumo.__name__, node=DatasetFitzHughNagumo)
-cs.store(group=Config.model.key, name=Model.__name__, node=Model)
+cs.store(group=Config.model.key, name=ModelDiffusion.__name__, node=ModelDiffusion)
+cs.store(group=Config.model.key, name=ModelFlowMatching.__name__, node=ModelFlowMatching)
 cs.store(name=Config.__name__, node=Config)
 
 
@@ -222,7 +249,7 @@ def get_new_config_alt_id():
                 return alt_id
 
 
-OmegaConf.register_new_resolver('config_alt_id', get_new_config_alt_id, use_cache=True)
+# OmegaConf.register_new_resolver('config_alt_id', get_new_config_alt_id, use_cache=True)
 
 
 def create_all(engine):
