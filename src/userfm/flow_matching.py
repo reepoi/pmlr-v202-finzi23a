@@ -21,14 +21,10 @@ from typing import Any, Callable, Sequence, Union
 
 from flax.core.frozen_dict import FrozenDict
 import jax
-from jax import grad
-from jax import jit
 from jax import random
 import jax.numpy as jnp
 import numpy as np
 import optax
-
-from userfm import sde_diffusion, utils
 
 Scorefn = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
 PRNGKey = jnp.ndarray
@@ -45,17 +41,17 @@ def nonefn(x):  # pylint: disable=unused-argument
 
 
 def train_flow_matching(
+    cfg,
     model,
     dataloader,
     data_std,
-    epochs=100,
-    lr=1e-3,
     cond_fn=lambda _: None,  # function: array -> array or None
-    num_ema_foldings=5,
+    num_ema_foldings=5,  # Taos: todo: add this to config
     writer=None,
     report=None,
     ckpt=None,
-    seed=None,  # to avoid initing jax
+    key=None,
+    rng_seed=None,  # to avoid initing jax
 ):
     """Train flow matching model with according to diffusion type.
 
@@ -76,72 +72,72 @@ def train_flow_matching(
     Returns:
       score function (xt,t,cond)->scores (s(xₜ,t):=∇logp(xₜ))
     """
+    if key is None:
+        key = jax.random.key(rng_seed)
     # initialize model
+    key, key_model_init = random.split(key)
     x = next(dataloader())
     t = np.random.rand(x.shape[0])
-    key = random.PRNGKey(42) if seed is None else seed
-    key, init_seed = random.split(key)
-    params = model.init(init_seed, x=x, t=t, train=False, cond=cond_fn(x))
+    params = model.init(key_model_init, x=x, t=t, train=False, cond=cond_fn(x))
     log.info('Param count: %(param_count).2f M', dict(param_count=count_params(params['params']) / 1e6))
 
-    def velocity(params, x, t, train=True, cond=None):
-        cond = cond / data_std if cond is not None else None
-        out = model.apply(params, x=x, t=t, train=train, cond=cond)
-        return out
-
     def loss(params, x_data, key):
-        key1, key2 = jax.random.split(key)
-        t = jax.random.uniform(key1, shape=(x_data.shape[0], 1, 1))
+        key, key_time = jax.random.split(key)
+        t = jax.random.uniform(key_time, shape=(x_data.shape[0], 1, 1))
 
-        x_noise = jax.random.normal(key2, x_data.shape)
-        target_velocity = x_data - (1 - 1e-3) * x_noise
+        key, key_noise = jax.random.split(key)
+        x_noise = jax.random.normal(key_noise, x_data.shape)
+
         xt = (1 - (1 - 1e-3) * t) * x_noise + t * x_data
-        error = velocity(params, xt, t.squeeze((1, 2)), cond=cond_fn(x_data)) - target_velocity
-        return jnp.mean(error**2)
 
-    tx = optax.adam(learning_rate=lr)
+        velocity_target = x_data - (1 - 1e-3) * x_noise
+        velocity_pred = model.apply(params, x=xt, t=t.squeeze((1, 2)), train=True, cond=None)
+        return ((velocity_pred - velocity_target)**2).mean()
+
+    tx = optax.adam(learning_rate=cfg.architecture.learning_rate)
     opt_state = tx.init(params)
-    ema_ts = epochs / num_ema_foldings  # number of ema timescales during training
+    ema_ts = cfg.architecture.epochs / num_ema_foldings  # number of ema timescales during training
     ema_params = params
-    jloss = jit(loss)
+    jloss = jax.jit(loss)
     loss_grad_fn = jax.value_and_grad(loss)
 
-    @jit
+    @jax.jit
     def update_fn(params, ema_params, opt_state, key, data):
-        loss_val, grads = loss_grad_fn(params, data, key)
+        key, key_loss = random.split(key)
+        loss_val, grads = loss_grad_fn(params, data, key_loss)
+
         updates, opt_state = tx.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
-        key, _ = random.split(key)
         ema_update = lambda p, ema: ema + (p - ema) / ema_ts
         ema_params = jax.tree_map(ema_update, params, ema_params)
+
         return params, ema_params, opt_state, key, loss_val
 
-    for epoch in range(epochs + 1):
+    for epoch in range(cfg.architecture.epochs + 1):
         for i, data in enumerate(dataloader()):
             params, ema_params, opt_state, key, loss_val = update_fn(
                 params, ema_params, opt_state, key, data
             )
         if epoch % 25 == 0:
             ema_loss = jloss(ema_params, data, key)  # pylint: disable=undefined-loop-variable
-            log.info('Epoch %(epoch)d, Val Loss %(loss_val).3f, Ema Loss: %(ema_loss).3f', dict(epoch=epoch, loss_val=loss_val, ema_loss=ema_loss))
             if writer is not None:
                 metrics = {"loss": loss_val, "ema_loss": ema_loss}
                 eval_metrics_cpu = jax.tree_map(np.array, metrics)
                 writer.write_scalars(epoch, eval_metrics_cpu)
-                report(epoch, time.time())
 
     model_state = ema_params
     if ckpt is not None:
         ckpt.save(model_state)
 
-    @jit
-    def score_out(x, t, cond=None):
+    @jax.jit
+    def velocity(x, t, cond=None):
         """Trained score function s(xₜ,t):=∇logp(xₜ)."""
         if not hasattr(t, "shape") or not t.shape:
             t = jnp.ones(x.shape[0]) * t
-        return velocity(ema_params, x, t, train=False, cond=cond)
+        velocity_pred = model.apply(ema_params, x=x, t=t, train=False, cond=cond)
+        return velocity_pred
 
-    return score_out
+    return velocity
 
 
 def count_params(params):

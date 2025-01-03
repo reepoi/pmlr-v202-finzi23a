@@ -45,12 +45,11 @@ def nonefn(x):  # pylint: disable=unused-argument
 
 
 def train_diffusion(
+    cfg,
     model,
     diffusion,
     dataloader,
     data_std,
-    epochs=100,
-    lr=1e-3,
     cond_fn=nonefn,  # function: array -> array or None
     num_ema_foldings=5,
     writer=None,
@@ -107,14 +106,15 @@ def train_diffusion(
 
     def loss(params, x, key):
         """Score matching MSE loss from Yang's Score-SDE paper."""
-        key1, key2 = jax.random.split(key)
         # Use lowvar grid time sampling from https://arxiv.org/pdf/2107.00630.pdf
         # Appendix I
-        u0 = jax.random.uniform(key1)
+        key, key_time = jax.random.split(key)
+        u0 = jax.random.uniform(key_time)
         u = jnp.remainder(u0 + jnp.linspace(0, 1, x.shape[0]), 1)
         t = u * (diffusion.tmax - diffusion.tmin) + diffusion.tmin
 
-        xt = diffusion.noise_input(x, t, key2)
+        key, key_noise = jax.random.split(key)
+        xt = diffusion.noise_input(x, t, key_noise)
         target_score = diffusion.noise_score(xt, x, t)
         # weighting from Yang Song's https://arxiv.org/abs/2011.13456
         # Taos: this appears to be using the weighting from Eqn.(1) used for dicrete noise levels.
@@ -122,31 +122,31 @@ def train_diffusion(
         error = score(params, xt, t, cond=cond_fn(x)) - target_score
         return jnp.mean((diffusion.covsqrt.inverse(error) ** 2) * weighting)
 
-    tx = optax.adam(learning_rate=lr)
+    tx = optax.adam(learning_rate=cfg.architecture.learning_rate)
     opt_state = tx.init(params)
-    ema_ts = epochs / num_ema_foldings  # number of ema timescales during training
+    ema_ts = cfg.architecture.epochs / num_ema_foldings  # number of ema timescales during training
     ema_params = params
     jloss = jit(loss)
     loss_grad_fn = jax.value_and_grad(loss)
 
     @jit
     def update_fn(params, ema_params, opt_state, key, data):
-        loss_val, grads = loss_grad_fn(params, data, key)
+        key, key_loss = random.split(key)
+        loss_val, grads = loss_grad_fn(params, data, key_loss)
+
         updates, opt_state = tx.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
-        key, _ = random.split(key)
         ema_update = lambda p, ema: ema + (p - ema) / ema_ts
         ema_params = jax.tree_map(ema_update, params, ema_params)
         return params, ema_params, opt_state, key, loss_val
 
-    for epoch in range(epochs + 1):
+    for epoch in range(cfg.architecture.epochs + 1):
         for i, data in enumerate(dataloader()):
             params, ema_params, opt_state, key, loss_val = update_fn(
                 params, ema_params, opt_state, key, data
             )
         if epoch % 25 == 0:
             ema_loss = jloss(ema_params, data, key)  # pylint: disable=undefined-loop-variable
-            log.info('Epoch %(epoch)d, Val Loss %(loss_val).3f, Ema Loss: %(ema_loss).3f', dict(epoch=epoch, loss_val=loss_val, ema_loss=ema_loss))
             if writer is not None:
                 metrics = {"loss": loss_val, "ema_loss": ema_loss}
                 eval_metrics_cpu = jax.tree_map(np.array, metrics)
