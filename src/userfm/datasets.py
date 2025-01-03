@@ -17,6 +17,7 @@
 
 import abc
 
+import jax
 from jax import device_count
 from jax import grad
 from jax import jit
@@ -57,11 +58,9 @@ class ODEDataset(abc.ABC):
 
     animator = Animation  # associated object to produce an animation of traj
 
-    def __init__(self, cfg, chunk_len=None, rng=None):
+    def __init__(self, cfg, key, chunk_len=None):
         self.cfg = cfg
-        if rng is None:
-            rng = np.random.default_rng()
-        self.rng = rng
+        self.key = key
 
         self.T, self.Zs = self.generate_trajectory_data()
         self.T_long = self.T
@@ -166,7 +165,8 @@ class Lorenz(ODEDataset):
         return zdot / self.cfg.rescaling
 
     def sample_initial_conditions(self, bs):
-        return self.rng.standard_normal((bs, 3))
+        self.key, key = jax.random.split(self.key)
+        return jax.random.normal(key, (bs, 3))
 
 
 class FitzHughNagumo(ODEDataset):
@@ -189,7 +189,8 @@ class FitzHughNagumo(ODEDataset):
         return jnp.concatenate([xdot, ydot]) * 5.0
 
     def sample_initial_conditions(self, bs):
-        return self.rng.standard_normal((bs, 4)) * 0.2
+        self.key, key = jax.random.split(self.key)
+        return jax.random.normal(key, (bs, 4)) * 0.2
 
 
 def unpack(z):
@@ -281,7 +282,8 @@ class SHO(HamiltonianDataset):
     def sample_initial_conditions(
         self, bs
     ):  # pytype: disable=signature-mismatch  # jax-ndarray
-        return self.rng.standard_normal((bs, 2))
+        self.key, key = jax.random.split(self.key)
+        return jax.random.normal(key, (bs, 2))
 
 
 class NPendulum(HamiltonianDataset):
@@ -327,20 +329,21 @@ class NPendulum(HamiltonianDataset):
     def sample_initial_conditions(
         self, bs
     ):  # pytype: disable=signature-mismatch  # jax-ndarray
-        z0 = self.rng.standard_normal(bs, 2 * self.n)
+        self.key, key = jax.random.split(self.key)
+        z0 = jax.random.normal(key, (bs, 2 * self.n))
         z0[:, self.n :] *= 0.2
         z0[:, -1] *= 1.5
         return z0
 
 
-def get_dataset(cfg, rng=None, rng_seed=None):
-    if rng is None:
-        rng = np.random.default_rng(rng_seed)
+def get_dataset(cfg, key=None, rng_seed=None):
+    if key is None:
+        key = jax.random.key(rng_seed)
     if isinstance(cfg, cs.DatasetLorenz):
-        return Lorenz(cfg, rng=rng)
+        return Lorenz(cfg, key=key)
     elif isinstance(cfg, cs.DatasetFitzHughNagumo):
-        return FitzHughNagumo(cfg, rng=rng)
+        return FitzHughNagumo(cfg, key=key)
     elif isinstance(cfg, cs.DatasetPendulum):
-        return NPendulum(cfg, rng=rng)
+        return NPendulum(cfg, key=key)
     else:
         raise ValueError(f'Unknown dataset: {cfg}')
