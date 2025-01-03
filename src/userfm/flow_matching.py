@@ -93,11 +93,11 @@ def train_flow_matching(
         key1, key2 = jax.random.split(key)
         t = jax.random.uniform(key1, shape=(x_data.shape[0], 1, 1))
 
-        x_noise = diffusion.noise(key2, x_data.shape)
-        target_velocity = diffusion.velocity_conditional(t, x_noise=x_noise, x_data=x_data)
+        x_noise = jax.random.normal(key2, x_data.shape)
+        target_velocity = x_data - (1 - 1e-3) * x_noise
         xt = (1 - (1 - 1e-3) * t) * x_noise + t * x_data
         error = velocity(params, xt, t.squeeze((1, 2)), cond=cond_fn(x_data)) - target_velocity
-        return jnp.mean(diffusion.covsqrt.inverse(error)**2)
+        return jnp.mean(error**2)
 
     tx = optax.adam(learning_rate=lr)
     opt_state = tx.init(params)
