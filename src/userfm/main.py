@@ -95,7 +95,7 @@ def train_diffusion(cfg):
         nsteps=1000, traj=False
     )
     kstart = 3
-    err = pmetric(stochastic_samples[..., kstart:], T_long[kstart:], ds.integrate)[0]
+    err = pmetric(stochastic_samples[:, kstart:], T_long[kstart:], ds.integrate)[0]
 
     log.info('NLL: %(nll).3f, Err: %(err).3f', dict(nll=nll, err=err))
 
@@ -135,14 +135,19 @@ def train_flow_matching(cfg):
 
     eval_velocity = functools.partial(velocity, cond=None)
     key = jax.random.PRNGKey(cfg.rng_seed)
-    nll = samplers.compute_nll(flow_matching.VarianceExploding(), eval_velocity, key, test_x)
+    cfg_sde_diffusion = OmegaConf.create(dict(
+        time_min=1e-3, time_max=1.,
+        sigma_min = 1e-3, sigma_max=300.,
+    ))
+    difftype = sde_diffusion.VarianceExploding(cfg_sde_diffusion)
+    nll = samplers.compute_nll(difftype, eval_velocity, key, test_x).mean()
     stochastic_samples = samplers.sde_sample(
-        flow_matching.VarianceExploding(), eval_velocity, key, test_x.shape,
+        difftype, eval_velocity, key, test_x.shape,
         nsteps=1_000, traj=False,
     )
     # Taos: todo: parametrize kstart in config
     kstart = 3
-    err = pmetric(stochastic_samples[..., kstart:], T_long[kstart:], ds.integrate)[0]
+    err = pmetric(stochastic_samples[:, kstart:], T_long[kstart:], ds.integrate)[0]
 
     log.info('NLL: %(nll).3f, Err: %(err).3f', dict(nll=nll, err=err))
 
@@ -192,6 +197,7 @@ def get_run_dir(hydra_init=HYDRA_INIT, commit=True):
             if commit:
                 db.commit()
             return first_override, str(cfg.run_dir)
+
 
 if __name__ == '__main__':
     first_override, run_dir = get_run_dir()
