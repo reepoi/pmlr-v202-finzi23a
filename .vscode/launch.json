@@ -21,8 +21,23 @@
             "name": "Launch main flow matching",
             "program": "/root/workspace/GitHub/pmlr-v202-finzi23a/src/userfm/main.py",
             "args": [
-                "dataset=DatasetLorenz",
+                "dataset=Lorenz",
+                "dataset.trajectory_count=1000",
                 "model=ModelFlowMatching"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "${input:gpu}"
+            }
+        },
+        {
+            "type": "python",
+            "request": "launch",
+            "name": "Launch main diffusion",
+            "program": "/root/workspace/GitHub/pmlr-v202-finzi23a/src/userfm/main.py",
+            "args": [
+                "dataset=Lorenz",
+                "dataset.trajectory_count=1000",
+                "model=ModelDiffusion"
             ],
             "env": {
                 "CUDA_VISIBLE_DEVICES": "${input:gpu}"

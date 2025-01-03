@@ -149,7 +149,7 @@ def compute_nll(diffusion,
   # Logdet correction from spatial covariance matrix
   inv_sqrt_logdet = -diffusion.covsqrt.logdet(data.shape)
   std_max = diffusion.sigma(diffusion.tmax)
-  print(r'xf std {inv_sqrt_cov_xf.std()} and std_max: {std_max}')
+  print(f'xf std {inv_sqrt_cov_xf.std()} and std_max: {std_max}')
   logpxf = -(inv_sqrt_cov_xf**2 / std_max**2 + jnp.log(
       2 * np.pi * std_max**2)).sum(-1) / 2  # N(0,smax^2) log likelihood
   logpx0 = (logpxf + logdet_dxf_dx0 + inv_sqrt_logdet)

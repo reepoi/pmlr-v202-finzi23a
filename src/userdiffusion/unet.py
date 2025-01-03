@@ -613,8 +613,8 @@ def unet_64_config(out_dim,
       embed_dim=c,
       blocks=[
           config(
-              d_channels=c,
-              u_channels=c,
+              d_channels=c,  # Taos: ResBlock + Downsample
+              u_channels=c,  # Taos: SkipResBlock + Upsample
               kernel_size_0=(3,),
               kernel_size_1=(3,),
               num_subblocks=4,

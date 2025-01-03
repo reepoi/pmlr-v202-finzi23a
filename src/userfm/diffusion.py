@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Core flow matching model implementation, noise schedule, type, and training."""
+"""Core diffusion model implementation, noise schedule, type, and training."""
 
 import time
 import logging
-from typing import Any, Callable, Sequence, Union
+from typing import Any, Callable, Iterator, List, Optional, Sequence, Union
 
+from flax import linen as nn
 from flax.core.frozen_dict import FrozenDict
 import jax
 from jax import grad
@@ -30,6 +31,8 @@ import optax
 
 from userfm import sde_diffusion, utils
 
+log = logging.getLogger(__file__)
+
 Scorefn = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
 PRNGKey = jnp.ndarray
 TimeType = Union[float, jnp.ndarray]
@@ -37,27 +40,32 @@ ArrayShape = Sequence[int]
 ParamType = Any
 
 
-log = logging.getLogger(__file__)
-
-
 def nonefn(x):  # pylint: disable=unused-argument
     return None
 
 
-def train_flow_matching(
+def train_diffusion(
     model,
+    diffusion,
     dataloader,
     data_std,
     epochs=100,
     lr=1e-3,
-    cond_fn=lambda _: None,  # function: array -> array or None
+    cond_fn=nonefn,  # function: array -> array or None
     num_ema_foldings=5,
     writer=None,
     report=None,
     ckpt=None,
     seed=None,  # to avoid initing jax
 ):
-    """Train flow matching model with according to diffusion type.
+    """Train diffusion model with score matching according to diffusion type.
+
+    Minimizes score matching MSE loss between the model scores s(xₜ,t)
+    and the data scores ∇log p(xₜ|x₀) over noised datapoints xₜ, with t sampled
+    uniformly from 0 to 1, and x sampled from the training distribution.
+    Produces score function s(xₜ,t) ≈ ∇log p(xₜ) which can be used for sampling.
+
+    Loss = 𝔼[|s(xₜ,t) − ∇log p(xₜ|x₀)|²σₜ²]
 
     Args:
       model: UNet mapping (x,t,train,cond) -> x'
@@ -82,22 +90,35 @@ def train_flow_matching(
     key = random.PRNGKey(42) if seed is None else seed
     key, init_seed = random.split(key)
     params = model.init(init_seed, x=x, t=t, train=False, cond=cond_fn(x))
-    log.info('Param count: %(param_count).2f M', dict(param_count=count_params(params['params']) / 1e6))
+    log.info(f"{count_params(params['params'])/1e6:.2f}M Params")  # pylint: disable=logging-fstring-interpolation
 
-    def velocity(params, x, t, train=True, cond=None):
+    def score(params, x, t, train=True, cond=None):
+        """Score function with appropriate input and output scaling."""
+        # scaling is equivalent to that in Karras et al. https://arxiv.org/abs/2206.00364
+        sigma, scale = utils.unsqueeze_like(x, diffusion.sigma(t), diffusion.scale(t))
+        # Taos: Karras et al. $c_in$ and $s(t)$ of EDM.
+        input_scale = 1 / jnp.sqrt(sigma**2 + (scale * data_std) ** 2)
         cond = cond / data_std if cond is not None else None
-        out = model.apply(params, x=x, t=t, train=train, cond=cond)
-        return out
+        out = model.apply(params, x=x * input_scale, t=t, train=train, cond=cond)
+        # Taos: Karras et al. the demonimator of $c_out$ of EDM; where is the numerator?
+        return out / jnp.sqrt(sigma**2 + scale**2 * data_std**2)
 
-    def loss(params, x_data, key):
+    def loss(params, x, key):
+        """Score matching MSE loss from Yang's Score-SDE paper."""
         key1, key2 = jax.random.split(key)
-        t = jax.random.uniform(key1, shape=(x_data.shape[0], 1, 1))
+        # Use lowvar grid time sampling from https://arxiv.org/pdf/2107.00630.pdf
+        # Appendix I
+        u0 = jax.random.uniform(key1)
+        u = jnp.remainder(u0 + jnp.linspace(0, 1, x.shape[0]), 1)
+        t = u * (diffusion.tmax - diffusion.tmin) + diffusion.tmin
 
-        x_noise = diffusion.noise(key2, x_data.shape)
-        target_velocity = diffusion.velocity_conditional(t, x_noise=x_noise, x_data=x_data)
-        xt = (1 - (1 - 1e-3) * t) * x_noise + t * x_data
-        error = velocity(params, xt, t.squeeze((1, 2)), cond=cond_fn(x_data)) - target_velocity
-        return jnp.mean(diffusion.covsqrt.inverse(error)**2)
+        xt = diffusion.noise_input(x, t, key2)
+        target_score = diffusion.noise_score(xt, x, t)
+        # weighting from Yang Song's https://arxiv.org/abs/2011.13456
+        # Taos: this appears to be using the weighting from Eqn.(1) used for dicrete noise levels.
+        weighting = utils.unsqueeze_like(x, diffusion.sigma(t) ** 2)
+        error = score(params, xt, t, cond=cond_fn(x)) - target_score
+        return jnp.mean((diffusion.covsqrt.inverse(error) ** 2) * weighting)
 
     tx = optax.adam(learning_rate=lr)
     opt_state = tx.init(params)
@@ -139,7 +160,7 @@ def train_flow_matching(
         """Trained score function s(xₜ,t):=∇logp(xₜ)."""
         if not hasattr(t, "shape") or not t.shape:
             t = jnp.ones(x.shape[0]) * t
-        return velocity(ema_params, x, t, train=False, cond=cond)
+        return score(ema_params, x, t, train=False, cond=cond)
 
     return score_out
 

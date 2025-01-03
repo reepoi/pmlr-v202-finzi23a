@@ -113,7 +113,7 @@ class DatasetFitzHughNagumo(Dataset):
     coupling21: float = field(default=1., metadata=dict(sa=ColumnRequired(sa.Double)))
 
 
-class Model(CfgWithTable):
+class ModelArchitecture(CfgWithTable):
     __tablename__ = __qualname__
     __mapper_args__ = dict(
         polymorphic_on='sa_inheritance',
@@ -134,6 +134,84 @@ class Model(CfgWithTable):
     learning_rate: float = field(default=1e-4, metadata=dict(sa=ColumnRequired(sa.Double)))
 
 
+class UNet(ModelArchitecture):
+    __tablename__ = __qualname__
+    __mapper_args__ = dict(
+        polymorphic_on='sa_inheritance',
+        polymorphic_identity=__tablename__,
+    )
+    _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
+
+    id: int = field(init=False, metadata=dict(
+        sa=sa.Column(sa.ForeignKey(f'{ModelArchitecture.__name__}.id'), primary_key=True),
+        omegaconf_ignore=True,
+    ))
+
+    base_channel_count: int = field(default=32, metadata=dict(sa=ColumnRequired(sa.Integer)))
+    attention: bool = field(default=False, metadata=dict(sa=ColumnRequired(sa.Boolean)))
+
+
+class SDEDiffusion(CfgWithTable):
+    __tablename__ = __qualname__
+    __mapper_args__ = dict(
+        polymorphic_on='sa_inheritance',
+        polymorphic_identity=__tablename__,
+    )
+    sa_inheritance: str = field(init=False, repr=False, metadata=dict(
+        sa=sa.Column(sa.String(20), nullable=False),
+        omegaconf_ignore=True,
+    ))
+    _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
+
+    id: int = field(init=False, metadata=dict(
+        sa=sa.Column(sa.Integer, primary_key=True),
+        omegaconf_ignore=True,
+    ))
+
+    time_min: float = field(default=1e-3, metadata=dict(sa=ColumnRequired(sa.Double)))
+    time_max: float = field(default=1., metadata=dict(sa=ColumnRequired(sa.Double)))
+
+
+class SDEVarianceExploding(SDEDiffusion):
+    __tablename__ = __qualname__
+    __mapper_args__ = dict(
+        polymorphic_on='sa_inheritance',
+        polymorphic_identity=__tablename__,
+    )
+    _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
+
+    id: int = field(init=False, metadata=dict(
+        sa=sa.Column(sa.ForeignKey(f'{SDEDiffusion.__name__}.id'), primary_key=True),
+        omegaconf_ignore=True,
+    ))
+
+    sigma_min: float = field(default=1e-3, metadata=dict(sa=ColumnRequired(sa.Double)))
+    sigma_max: float = field(default=300., metadata=dict(sa=ColumnRequired(sa.Double)))
+
+
+class Model(CfgWithTable):
+    __tablename__ = __qualname__
+    __mapper_args__ = dict(
+        polymorphic_on='sa_inheritance',
+        polymorphic_identity=__tablename__,
+    )
+    sa_inheritance: str = field(init=False, repr=False, metadata=dict(
+        sa=sa.Column(sa.String(20), nullable=False),
+        omegaconf_ignore=True,
+    ))
+    _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
+
+    id: int = field(init=False, metadata=dict(
+        sa=sa.Column(sa.Integer, primary_key=True),
+        omegaconf_ignore=True,
+    ))
+
+    architecture_id: int = field(init=False, repr=False, metadata=dict(
+        sa=sa.Column(ModelArchitecture.__name__, sa.ForeignKey(f'{ModelArchitecture.__name__}.id'), nullable=False),
+        omegaconf_ignore=True,
+    ))
+    architecture: ModelArchitecture = field(default_factory=UNet, metadata=dict(sa=orm.relationship(ModelArchitecture.__name__, foreign_keys=[architecture_id.metadata['sa']])))
+
 
 class ModelDiffusion(Model):
     __tablename__ = __qualname__
@@ -147,6 +225,12 @@ class ModelDiffusion(Model):
         sa=sa.Column(sa.ForeignKey(f'{Model.__name__}.id'), primary_key=True),
         omegaconf_ignore=True,
     ))
+
+    sde_diffusion_id: int = field(init=False, repr=False, metadata=dict(
+        sa=sa.Column(SDEDiffusion.__name__, sa.ForeignKey(f'{SDEDiffusion.__name__}.id'), nullable=False),
+        omegaconf_ignore=True,
+    ))
+    sde_diffusion: SDEDiffusion = field(default_factory=SDEVarianceExploding, metadata=dict(sa=orm.relationship(SDEDiffusion.__name__, foreign_keys=[sde_diffusion_id.metadata['sa']])))
 
 
 class ModelFlowMatching(Model):
