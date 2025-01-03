@@ -56,7 +56,8 @@ def train_diffusion(
     writer=None,
     report=None,
     ckpt=None,
-    seed=None,  # to avoid initing jax
+    key=None,
+    rng_seed=None,  # to avoid initing jax
 ):
     """Train diffusion model with score matching according to diffusion type.
 
@@ -87,7 +88,8 @@ def train_diffusion(
     # initialize model
     x = next(dataloader())
     t = np.random.rand(x.shape[0])
-    key = random.PRNGKey(42) if seed is None else seed
+    if key is None:
+        key = jax.random.key(rng_seed)
     key, init_seed = random.split(key)
     params = model.init(init_seed, x=x, t=t, train=False, cond=cond_fn(x))
     log.info(f"{count_params(params['params'])/1e6:.2f}M Params")  # pylint: disable=logging-fstring-interpolation
@@ -149,7 +151,6 @@ def train_diffusion(
                 metrics = {"loss": loss_val, "ema_loss": ema_loss}
                 eval_metrics_cpu = jax.tree_map(np.array, metrics)
                 writer.write_scalars(epoch, eval_metrics_cpu)
-                report(epoch, time.time())
 
     model_state = ema_params
     if ckpt is not None:

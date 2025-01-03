@@ -8,7 +8,7 @@ import tensorflow as tf
 import jax
 import jax.numpy as jnp
 import clu.checkpoint
-import clu.platform
+import clu.metric_writers
 
 from userdiffusion import unet, samplers
 from userfm import cs, datasets, diffusion, flow_matching, sde_diffusion
@@ -53,7 +53,8 @@ def pmetric(qs, times, integrate):
     return jnp.exp(log_metric.mean()), std_err
 
 
-def train_diffusion(cfg):
+def train_diffusion(cfg, writer):
+    key = jax.random.key(cfg.rng_seed)
     ds = datasets.get_dataset(cfg.dataset, rng_seed=cfg.rng_seed)
     trajectories = ds.Zs[cfg.dataset.batch_size:]
     if trajectories.shape[1] != 60:
@@ -77,21 +78,24 @@ def train_diffusion(cfg):
     )
     model = unet.UNet(cfg_unet)
 
-    ckpt = clu.checkpoint.MultihostCheckpoint(str(cfg.run_dir/'checkpoints'), {}, max_to_keep=2)
+    ckpt = clu.checkpoint.MultihostCheckpoint(str(cfg.run_dir/'model-checkpoints'), {}, max_to_keep=2)
 
     difftype = sde_diffusion.get_sde_diffusion(cfg.model.sde_diffusion)
+    key, key_train = jax.random.split(key)
     score_fn = diffusion.train_diffusion(
         model, difftype, dl, data_std,
         epochs=cfg.model.architecture.epochs,
         lr=cfg.model.architecture.learning_rate,
         ckpt=ckpt,
+        writer=writer,
+        key=key_train,
     )
 
     eval_scorefn = functools.partial(score_fn, cond=None)
-    key = jax.random.PRNGKey(cfg.rng_seed)
-    nll = samplers.compute_nll(difftype, eval_scorefn, key, test_x).mean()
+    key, key_eval = jax.random.split(key)
+    nll = samplers.compute_nll(difftype, eval_scorefn, key_eval, test_x).mean()
     stochastic_samples = samplers.sde_sample(
-        difftype, eval_scorefn, key, test_x.shape,
+        difftype, eval_scorefn, key_eval, test_x.shape,
         nsteps=1000, traj=False
     )
     kstart = 3
@@ -124,13 +128,14 @@ def train_flow_matching(cfg):
     )
     model = unet.UNet(cfg_unet)
 
-    ckpt = clu.checkpoint.MultihostCheckpoint(str(cfg.run_dir/'checkpoints'), {}, max_to_keep=2)
+    ckpt = clu.checkpoint.MultihostCheckpoint(str(cfg.run_dir/'model-checkpoints'), {}, max_to_keep=2)
 
     velocity = flow_matching.train_flow_matching(
         model, dl, data_std,
         epochs=cfg.model.architecture.epochs,
         lr=cfg.model.architecture.learning_rate,
         ckpt=ckpt,
+        seed=cfg.rng_seed,
     )
 
     eval_velocity = functools.partial(velocity, cond=None)
@@ -173,10 +178,14 @@ def main(cfg):
         log.info('JAX process: %d / %d', jax.process_index(), jax.process_count())
         log.info('JAX devices: %r', jax.devices())
 
+        writer = clu.metric_writers.create_default_writer(
+            logdir=str(cfg.run_dir), just_logging=jax.process_index() != 0
+        )
+
         if isinstance(cfg.model, cs.ModelDiffusion):
-            train_diffusion(cfg)
+            train_diffusion(cfg, writer)
         elif isinstance(cfg.model, cs.ModelFlowMatching):
-            train_flow_matching(cfg)
+            train_flow_matching(cfg, writer)
         else:
             raise ValueError(f'Unknown model: {cfg.model}')
 
