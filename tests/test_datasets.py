@@ -12,6 +12,7 @@ from userdiffusion import ode_datasets as datasets_old
 @pytest.mark.parametrize('overrides', [
     ['+experiment=Lorenz', 'dataset.trajectory_count=20', 'dataset.time_step_count=100', 'model=ModelDiffusion'],
     ['+experiment=FitzHughNagumo', 'dataset.trajectory_count=20', 'dataset.time_step_count=667', 'model=ModelDiffusion'],
+    ['+experiment=SimpleHarmonicOscillator', 'dataset.trajectory_count=20', 'dataset.time_step_count=60', 'model=ModelDiffusion'],
 ])
 def test_datasets_deterministic_with_rng_seed(engine, overrides):
     cfg = init_hydra_cfg('config', overrides)
@@ -32,6 +33,7 @@ def test_datasets_deterministic_with_rng_seed(engine, overrides):
 @pytest.mark.parametrize('overrides', [
     ['+experiment=Lorenz', 'dataset.trajectory_count=20', 'dataset.time_step_count=100', 'model=ModelDiffusion'],
     ['+experiment=FitzHughNagumo', 'dataset.trajectory_count=20', 'dataset.time_step_count=667', 'model=ModelDiffusion'],
+    ['+experiment=SimpleHarmonicOscillator', 'dataset.trajectory_count=20', 'dataset.time_step_count=60', 'model=ModelDiffusion'],
 ])
 def test_datasets_equal(engine, overrides):
     cfg = init_hydra_cfg('config', overrides)

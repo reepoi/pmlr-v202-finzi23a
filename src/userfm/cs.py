@@ -113,6 +113,20 @@ class DatasetFitzHughNagumo(Dataset):
     coupling21: float = field(default=1., metadata=dict(sa=ColumnRequired(sa.Double)))
 
 
+class DatasetSimpleHarmonicOscillator(Dataset):
+    __tablename__ = __qualname__
+    __mapper_args__ = dict(
+        polymorphic_on='sa_inheritance',
+        polymorphic_identity=__tablename__,
+    )
+    _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
+
+    id: int = field(init=False, metadata=dict(
+        sa=sa.Column(sa.ForeignKey(f'{Dataset.__name__}.id'), primary_key=True),
+        omegaconf_ignore=True,
+    ))
+
+
 class ModelArchitecture(CfgWithTable):
     __tablename__ = __qualname__
     __mapper_args__ = dict(
@@ -308,6 +322,7 @@ def generate_random_string_id(mapper, connection, target):
 cs = hydra.core.config_store.ConfigStore.instance()
 cs.store(group=Config.dataset.key, name=DatasetLorenz.__name__, node=DatasetLorenz)
 cs.store(group=Config.dataset.key, name=DatasetFitzHughNagumo.__name__, node=DatasetFitzHughNagumo)
+cs.store(group=Config.dataset.key, name=DatasetSimpleHarmonicOscillator.__name__, node=DatasetSimpleHarmonicOscillator)
 cs.store(group=Config.model.key, name=ModelDiffusion.__name__, node=ModelDiffusion)
 cs.store(group=Config.model.key, name=ModelFlowMatching.__name__, node=ModelFlowMatching)
 cs.store(name=Config.__name__, node=Config)

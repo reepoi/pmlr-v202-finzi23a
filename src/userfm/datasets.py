@@ -268,7 +268,7 @@ class HamiltonianDataset(ODEDataset):
         return anim.animate()
 
 
-class SHO(HamiltonianDataset):
+class SimpleHarmonicOscillator(HamiltonianDataset):
     """A basic simple harmonic oscillator."""
 
     def hamiltonian(self, z):
@@ -343,6 +343,8 @@ def get_dataset(cfg, key=None, rng_seed=None):
         return Lorenz(cfg, key=key)
     elif isinstance(cfg, cs.DatasetFitzHughNagumo):
         return FitzHughNagumo(cfg, key=key)
+    elif isinstance(cfg, cs.DatasetSimpleHarmonicOscillator):
+        return SimpleHarmonicOscillator(cfg, key=key)
     elif isinstance(cfg, cs.DatasetPendulum):
         return NPendulum(cfg, key=key)
     else:

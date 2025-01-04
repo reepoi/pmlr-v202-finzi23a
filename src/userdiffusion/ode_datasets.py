@@ -383,6 +383,8 @@ def get_dataset(cfg, key=None, rng_seed=None):
     return LorenzDataset(N=cfg.trajectory_count, key=key)
   elif isinstance(cfg, cs.DatasetFitzHughNagumo):
     return FitzHughDataset(N=cfg.trajectory_count, key=key)
+  elif isinstance(cfg, cs.DatasetSimpleHarmonicOscillator):
+      return SHO(N=cfg.trajectory_count, integration_time=6, key=key)
   elif isinstance(cfg, cs.DatasetPendulum):
     return NPendulum(N=cfg.trajectory_count, key=key)
   else:
