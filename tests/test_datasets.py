@@ -1,5 +1,6 @@
 import pytest
 from omegaconf import OmegaConf
+import jax
 
 from fixtures import init_hydra_cfg, engine
 from userfm import cs
@@ -17,8 +18,9 @@ def test_datasets_deterministic_with_rng_seed(engine, overrides):
     with cs.orm.Session(engine) as session:
         cfg = cs.instantiate_and_insert_config(session, OmegaConf.to_container(cfg))
         dss = []
+        key = jax.random.key(cfg.rng_seed)
         for _ in range(2):
-            dss.append(datasets.get_dataset(cfg.dataset, rng_seed=cfg.rng_seed))
+            dss.append(datasets.get_dataset(cfg.dataset, key=key))
         ds1, ds2 = dss
         assert len(ds1) == len(ds2)
         for i in range(len(ds1)):
@@ -35,8 +37,9 @@ def test_datasets_equal(engine, overrides):
     cfg = init_hydra_cfg('config', overrides)
     with cs.orm.Session(engine) as session:
         cfg = cs.instantiate_and_insert_config(session, OmegaConf.to_container(cfg))
-        ds = datasets.get_dataset(cfg.dataset, rng_seed=cfg.rng_seed)
-        ds_old = datasets_old.get_dataset(cfg.dataset, rng_seed=cfg.rng_seed)
+        key = jax.random.key(cfg.rng_seed)
+        ds = datasets.get_dataset(cfg.dataset, key=key)
+        ds_old = datasets_old.get_dataset(cfg.dataset, key=key)
         assert len(ds) == len(ds_old)
         for i in range(len(ds)):
             assert (ds[i][0][0] == ds_old[i][0][0]).all()

@@ -16,6 +16,7 @@
 """Library for generating datasets based on general ODEs and hamiltonian systems."""
 from typing import Callable, Optional, Tuple
 
+import jax
 from jax import device_count
 from jax import grad
 from jax import jit
@@ -59,11 +60,12 @@ class ODEDataset(object):
 
   def __init__(
       self,
+      key,
       N = 30,  # pylint: disable=invalid-name
       chunk_len = None,
       dt = 0.1,
       integration_time = 30,
-      rng=None):
+      ):
     """Constructor for the ODE dataset.
 
     Args:
@@ -76,9 +78,7 @@ class ODEDataset(object):
           randomly sampled
     """
     super().__init__()
-    if rng is None:
-        rng = np.random.default_rng()
-    self.rng = rng
+    self.key = key
     self.Zs = self.generate_trajectory_data(N, dt, integration_time)  # pylint: disable=invalid-name
     T = np.asarray(jnp.arange(0, integration_time, dt))  # pylint: disable=invalid-name
     # Taos: drop burn-in times
@@ -202,7 +202,8 @@ class LorenzDataset(ODEDataset):
     return zdot / scale
 
   def sample_initial_conditions(self, bs):
-    return self.rng.standard_normal((bs, 3))
+    self.key, key = jax.random.split(self.key)
+    return jax.random.normal(key, (bs, 3))
 
 
 class FitzHughDataset(ODEDataset):
@@ -232,7 +233,8 @@ class FitzHughDataset(ODEDataset):
     return jnp.concatenate([xdot, ydot]) * 5.
 
   def sample_initial_conditions(self, bs):
-    return self.rng.standard_normal((bs, 4)) * .2
+    self.key, key = jax.random.split(self.key)
+    return jax.random.normal(key, (bs, 4)) * 0.2
 
 
 def unpack(z):
@@ -322,7 +324,8 @@ class SHO(HamiltonianDataset):
     return jnp.eye(1)
 
   def sample_initial_conditions(self, bs):  # pytype: disable=signature-mismatch  # jax-ndarray
-    return self.rng.standard_normal((bs, 2))
+    self.key, key = jax.random.split(self.key)
+    return jax.random.normal(key, (bs, 2))
 
 
 class NPendulum(HamiltonianDataset):
@@ -366,20 +369,21 @@ class NPendulum(HamiltonianDataset):
     return kinetic + potential
 
   def sample_initial_conditions(self, bs):  # pytype: disable=signature-mismatch  # jax-ndarray
-    z0 = self.rng.standard_normal((bs, 2 * self.n))
+    self.key, key = jax.random.split(self.key)
+    z0 = jax.random.normal(key, (bs, 2 * self.n))
     z0[:, self.n:] *= .2
     z0[:, -1] *= 1.5
     return z0
 
 
-def get_dataset(cfg, rng=None, rng_seed=None):
-  if rng is None:
-    rng = np.random.default_rng(rng_seed)
+def get_dataset(cfg, key=None, rng_seed=None):
+  if key is None:
+    key = jax.random.key(rng_seed)
   if isinstance(cfg, cs.DatasetLorenz):
-    return LorenzDataset(N=cfg.trajectory_count, rng=rng)
+    return LorenzDataset(N=cfg.trajectory_count, key=key)
   elif isinstance(cfg, cs.DatasetFitzHughNagumo):
-    return FitzHughDataset(N=cfg.trajectory_count, rng=rng)
+    return FitzHughDataset(N=cfg.trajectory_count, key=key)
   elif isinstance(cfg, cs.DatasetPendulum):
-    return NPendulum(N=cfg.trajectory_count, rng=rng)
+    return NPendulum(N=cfg.trajectory_count, key=key)
   else:
     raise ValueError(f'Unknown dataset: {cfg}')
