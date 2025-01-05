@@ -1,5 +1,6 @@
 import functools
 import logging
+import pprint
 import sys
 
 import hydra
@@ -59,13 +60,12 @@ HYDRA_INIT = dict(version_base=None, config_path='../../conf', config_name='conf
 
 @hydra.main(**HYDRA_INIT)
 def main(cfg):
-    print(OmegaConf.to_yaml(cfg, resolve=True))
-
     engine = cs.get_engine()
     cs.create_all(engine)
     with cs.orm.Session(engine, expire_on_commit=False) as db:
         cfg = cs.instantiate_and_insert_config(db, OmegaConf.to_container(cfg, resolve=True))
         db.commit()
+        pprint.pp(cfg)
         log.info(f'Outputs will be saved to: {cfg.run_dir}')
 
         # Hide GPUs from Tensorflow to prevent it from reserving memory,
@@ -114,6 +114,19 @@ def main(cfg):
                 writer=writer,
                 key=key_train,
             )
+            eval_scorefn = functools.partial(score_fn, cond=None)
+            key, key_eval = jax.random.split(key)
+            nll = samplers.compute_nll(difftype, eval_scorefn, key_eval, test_x).mean()
+            stochastic_samples = samplers.sde_sample(
+                difftype, eval_scorefn, key_eval, test_x.shape,
+                nsteps=1000, traj=False
+            )
+            kstart = 3
+            err = pmetric(stochastic_samples[:, kstart:], ds.T_long[kstart:], ds.integrate)[0]
+
+            log.info('NLL: %(nll).3f, Err: %(err).3f', dict(nll=nll, err=err))
+            eval_metrics_cpu = jax.tree_map(np.array, {"NLL": nll, "err": err})
+            writer.write_scalars(cfg.model.architecture.epochs, eval_metrics_cpu)
         elif isinstance(cfg.model, cs.ModelFlowMatching):
             velocity = flow_matching.train_flow_matching(
                 cfg.model,
@@ -124,20 +137,6 @@ def main(cfg):
             )
         else:
             raise ValueError(f'Unknown model: {cfg.model}')
-
-        eval_scorefn = functools.partial(score_fn, cond=None)
-        key, key_eval = jax.random.split(key)
-        nll = samplers.compute_nll(difftype, eval_scorefn, key_eval, test_x).mean()
-        stochastic_samples = samplers.sde_sample(
-            difftype, eval_scorefn, key_eval, test_x.shape,
-            nsteps=1000, traj=False
-        )
-        kstart = 3
-        err = pmetric(stochastic_samples[:, kstart:], ds.T_long[kstart:], ds.integrate)[0]
-
-        log.info('NLL: %(nll).3f, Err: %(err).3f', dict(nll=nll, err=err))
-        eval_metrics_cpu = jax.tree_map(np.array, {"NLL": nll, "err": err})
-        writer.write_scalars(cfg.model.architecture.epochs, eval_metrics_cpu)
 
 
 

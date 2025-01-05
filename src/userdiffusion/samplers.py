@@ -207,6 +207,32 @@ def discrete_ode_sample(diffusion,
   return xs if traj else x0  # pytype: disable=bad-return-type  # jax-ndarray
 
 
+def ode_sample_taos(velocity,
+                    tmax,
+                    key,
+                    x_shape,
+                    nsteps = 500,
+                    traj = False):
+  """Sample deterministically from model using the ODE (w/o adaptive solver).
+
+  Args:
+    diffusion: diffusion type
+    scorefn: function (x,t) -> x'
+    key: PRNGKey for sampling
+    x_shape: shape of stacked x (with batch size, e.g. (bs,n,c))
+    nsteps: number of discrete timesteps to use in ODE solver
+    traj: whether or not to return entire trajectory
+
+  Returns:
+    sample x0 if traj=False or [x0,x1,...] if traj=True
+  """
+  key, key_noise = jax.random.split(key)
+  x_noise = jax.random.normal(key_noise, x_shape)
+  timesteps = (.5 + np.arange(nsteps)[::-1]) / nsteps
+  x0, xs = heun_integrate(velocity, x_noise, timesteps)
+  return xs if traj else x0  # pytype: disable=bad-return-type  # jax-ndarray
+
+
 def sde_sample(diffusion,
                scorefn,
                key,

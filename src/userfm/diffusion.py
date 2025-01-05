@@ -40,8 +40,16 @@ ArrayShape = Sequence[int]
 ParamType = Any
 
 
-def nonefn(x):  # pylint: disable=unused-argument
-    return None
+def score(model, params, diffusion, data_std, x, t, train=True, cond=None):
+    """Score function with appropriate input and output scaling."""
+    # scaling is equivalent to that in Karras et al. https://arxiv.org/abs/2206.00364
+    sigma, scale = utils.unsqueeze_like(x, diffusion.sigma(t), diffusion.scale(t))
+    # Taos: Karras et al. $c_in$ and $s(t)$ of EDM.
+    input_scale = 1 / jnp.sqrt(sigma**2 + (scale * data_std) ** 2)
+    cond = cond / data_std if cond is not None else None
+    out = model.apply(params, x=x * input_scale, t=t, train=train, cond=cond)
+    # Taos: Karras et al. the demonimator of $c_out$ of EDM; where is the numerator?
+    return out / jnp.sqrt(sigma**2 + scale**2 * data_std**2)
 
 
 def train_diffusion(
@@ -50,7 +58,7 @@ def train_diffusion(
     diffusion,
     dataloader,
     data_std,
-    cond_fn=nonefn,  # function: array -> array or None
+    cond_fn=lambda _: None,  # function: array -> array or None
     num_ema_foldings=5,
     writer=None,
     report=None,
@@ -93,17 +101,6 @@ def train_diffusion(
     params = model.init(init_seed, x=x, t=t, train=False, cond=cond_fn(x))
     log.info(f"{count_params(params['params'])/1e6:.2f}M Params")  # pylint: disable=logging-fstring-interpolation
 
-    def score(params, x, t, train=True, cond=None):
-        """Score function with appropriate input and output scaling."""
-        # scaling is equivalent to that in Karras et al. https://arxiv.org/abs/2206.00364
-        sigma, scale = utils.unsqueeze_like(x, diffusion.sigma(t), diffusion.scale(t))
-        # Taos: Karras et al. $c_in$ and $s(t)$ of EDM.
-        input_scale = 1 / jnp.sqrt(sigma**2 + (scale * data_std) ** 2)
-        cond = cond / data_std if cond is not None else None
-        out = model.apply(params, x=x * input_scale, t=t, train=train, cond=cond)
-        # Taos: Karras et al. the demonimator of $c_out$ of EDM; where is the numerator?
-        return out / jnp.sqrt(sigma**2 + scale**2 * data_std**2)
-
     def loss(params, x, key):
         """Score matching MSE loss from Yang's Score-SDE paper."""
         # Use lowvar grid time sampling from https://arxiv.org/pdf/2107.00630.pdf
@@ -119,7 +116,7 @@ def train_diffusion(
         # weighting from Yang Song's https://arxiv.org/abs/2011.13456
         # Taos: this appears to be using the weighting from Eqn.(1) used for dicrete noise levels.
         weighting = utils.unsqueeze_like(x, diffusion.sigma(t) ** 2)
-        error = score(params, xt, t, cond=cond_fn(x)) - target_score
+        error = score(model, params, diffusion, data_std, xt, t, cond=cond_fn(x)) - target_score
         return jnp.mean((diffusion.covsqrt.inverse(error) ** 2) * weighting)
 
     tx = optax.adam(learning_rate=cfg.architecture.learning_rate)
