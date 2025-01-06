@@ -13,7 +13,7 @@ import clu.checkpoint
 import clu.metric_writers
 
 from userdiffusion import unet, samplers
-from userfm import cs, datasets, diffusion, flow_matching, sde_diffusion
+from userfm import cs, datasets, diffusion, flow_matching, sde_diffusion, utils
 
 
 log = logging.getLogger(__name__)
@@ -55,10 +55,7 @@ def pmetric(qs, times, integrate):
     return jnp.exp(log_metric.mean()), std_err
 
 
-HYDRA_INIT = dict(version_base=None, config_path='../../conf', config_name='config')
-
-
-@hydra.main(**HYDRA_INIT)
+@hydra.main(**utils.HYDRA_INIT)
 def main(cfg):
     engine = cs.get_engine()
     cs.create_all(engine)
@@ -140,7 +137,7 @@ def main(cfg):
 
 
 
-def get_run_dir(hydra_init=HYDRA_INIT, commit=True):
+def get_run_dir(hydra_init=utils.HYDRA_INIT, commit=True):
     with hydra.initialize(version_base=hydra_init['version_base'], config_path=hydra_init['config_path']):
         first_override = None
         overrides = []

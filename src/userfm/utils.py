@@ -1,3 +1,4 @@
+HYDRA_INIT = dict(version_base=None, config_path='../../conf', config_name='config')
 
 
 def unsqueeze_like(x, *objs):

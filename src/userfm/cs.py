@@ -68,6 +68,20 @@ class Dataset(CfgWithTable):
     odeint_rtol: float = field(default=1e-6, metadata=dict(sa=ColumnRequired(sa.Double)))
 
 
+class DatasetGaussianMixture(Dataset):
+    __tablename__ = __qualname__
+    __mapper_args__ = dict(
+        polymorphic_on='sa_inheritance',
+        polymorphic_identity=__tablename__,
+    )
+    _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
+
+    id: int = field(init=False, metadata=dict(
+        sa=sa.Column(sa.ForeignKey(f'{Dataset.__name__}.id'), primary_key=True),
+        omegaconf_ignore=True,
+    ))
+
+
 class DatasetLorenz(Dataset):
     __tablename__ = __qualname__
     __mapper_args__ = dict(
@@ -320,6 +334,7 @@ def generate_random_string_id(mapper, connection, target):
 
 
 cs = hydra.core.config_store.ConfigStore.instance()
+cs.store(group=Config.dataset.key, name=DatasetGaussianMixture.__name__, node=DatasetGaussianMixture)
 cs.store(group=Config.dataset.key, name=DatasetLorenz.__name__, node=DatasetLorenz)
 cs.store(group=Config.dataset.key, name=DatasetFitzHughNagumo.__name__, node=DatasetFitzHughNagumo)
 cs.store(group=Config.dataset.key, name=DatasetSimpleHarmonicOscillator.__name__, node=DatasetSimpleHarmonicOscillator)

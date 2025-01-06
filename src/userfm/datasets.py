@@ -16,7 +16,10 @@
 """Library for generating datasets based on general ODEs and hamiltonian systems."""
 
 import abc
+import functools
 
+import hydra
+from omegaconf import OmegaConf
 import jax
 from jax import device_count
 from jax import grad
@@ -31,8 +34,49 @@ from jax.sharding import PartitionSpec as P
 import numpy as np
 from tqdm.auto import tqdm
 
-from userfm import cs
+from userfm import cs, utils
 from userdiffusion.animations import Animation, PendulumAnimation
+
+
+class GaussianMixture:
+    def __init__(self, cfg, key):
+        self.cfg = cfg
+        self.key = key
+
+        self.T, self.Zs = self.generate_data()
+        self.T_long = self.T
+
+    def __len__(self):
+        return self.Zs.shape[0]
+
+    def __getitem__(self, i):
+        return (self.Zs[i, 0], self.T), self.Zs[i]
+
+    def generate_data(self):
+        coeffs = [.5, .5]
+        means = [-2., 2.]
+        stddevs = [-.5, .5]
+
+        self.key, *key_normals = jax.random.split(self.key, num=len(coeffs) + 1)
+        x_shape = (self.cfg.trajectory_count, self.cfg.time_step_count, 1)
+        normals = []
+        for c, mu, std, key_normal in zip(coeffs, means, stddevs, key_normals):
+            normals.append(jax.random.normal(key_normal, x_shape) * std + mu)
+        normals = jnp.concat(normals, axis=2)
+        self.key, key_select = jax.random.split(self.key)
+        keys_select = jax.random.split(key_select, num=x_shape[:2])
+        select_gaussian = jax.vmap(
+            jax.vmap(
+                jax.jit(
+                    functools.partial(jax.random.choice, shape=(1,))
+                )
+            )
+        )
+        Zs = select_gaussian(keys_select, normals)
+
+        T = jnp.arange(self.cfg.time_step_count) * self.cfg.time_step
+
+        return T, Zs
 
 
 class ODEDataset(abc.ABC):
@@ -339,7 +383,9 @@ class NPendulum(HamiltonianDataset):
 def get_dataset(cfg, key=None, rng_seed=None):
     if key is None:
         key = jax.random.key(rng_seed)
-    if isinstance(cfg, cs.DatasetLorenz):
+    if isinstance(cfg, cs.DatasetGaussianMixture):
+        return GaussianMixture(cfg, key=key)
+    elif isinstance(cfg, cs.DatasetLorenz):
         return Lorenz(cfg, key=key)
     elif isinstance(cfg, cs.DatasetFitzHughNagumo):
         return FitzHughNagumo(cfg, key=key)
@@ -349,3 +395,17 @@ def get_dataset(cfg, key=None, rng_seed=None):
         return NPendulum(cfg, key=key)
     else:
         raise ValueError(f'Unknown dataset: {cfg}')
+
+
+@hydra.main(**utils.HYDRA_INIT)
+def main(cfg):
+    engine = cs.get_engine()
+    cs.create_all(engine)
+    with cs.orm.Session(engine, expire_on_commit=False) as db:
+        cfg = cs.instantiate_and_insert_config(db, OmegaConf.to_container(cfg, resolve=True))
+        ds = get_dataset(cfg.dataset, rng_seed=cfg.rng_seed)
+        print('end')
+
+
+if __name__ == '__main__':
+    main()
