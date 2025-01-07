@@ -57,24 +57,19 @@ class GaussianMixture:
         means = [-2., 2.]
         stddevs = [-.5, .5]
 
-        self.key, *key_normals = jax.random.split(self.key, num=len(coeffs) + 1)
         x_shape = (self.cfg.trajectory_count, self.cfg.time_step_count, 1)
+
+        self.key, *key_normals = jax.random.split(self.key, num=len(coeffs) + 1)
         normals = []
         for c, mu, std, key_normal in zip(coeffs, means, stddevs, key_normals):
             normals.append(jax.random.normal(key_normal, x_shape) * std + mu)
-        normals = jnp.concat(normals, axis=2)
-        self.key, key_select = jax.random.split(self.key)
-        keys_select = jax.random.split(key_select, num=x_shape[:2])
-        select_gaussian = jax.vmap(
-            jax.vmap(
-                jax.jit(
-                    functools.partial(jax.random.choice, shape=(1,))
-                )
-            )
-        )
-        Zs = select_gaussian(keys_select, normals)
+        normals = jnp.concat(normals, axis=2).reshape(-1, len(normals))
 
-        T = jnp.arange(self.cfg.time_step_count) * self.cfg.time_step
+        self.key, key_select = jax.random.split(self.key)
+        keys_select = jax.random.split(key_select, num=x_shape[0] * x_shape[1])
+        Zs = jax.vmap(jax.random.choice)(keys_select, normals).reshape(x_shape)
+
+        T = jnp.zeros(self.cfg.trajectory_count)
 
         return T, Zs
 
