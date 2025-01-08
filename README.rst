@@ -49,8 +49,91 @@ Installation
 Training the models
 ===================
 
+To see all the configurable options, run
+
+.. code:: bash
+
+   python src/userfm/main.py dataset=GaussianMixture model=ModelDiffusion -c job
+
+Change the default ``out_dir`` of ``class Config`` in ``src/cs.py`` to where you want the trained models to be saved, or override it with
+
+.. code:: bash
+
+   python src/userfm/main.py out_dir=<path/to/save/trained/models> <other_overrides...>
+
+Gaussian Mixture
+^^^^^^^^^^^^^^^^
+
+To train the VE-SDE diffusion model, run
+
+.. code:: bash
+
+   python src/userfm/main.py +experiment=GaussianMixture model=ModelDiffusion
+
+To train the flow matching model, run
+
+.. code:: bash
+
+   python src/userfm/main.py +experiment=GaussianMixture model=ModelFlowMatching model/conditional_flow=<conditional_flow>
+
+where ``<conditional_flow>`` is replaced with either ``ConditionalOT`` or ``MinibatchOTConditionalOT``.
+
+Simple Harmonic Oscillator
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+To train the VE-SDE diffusion model, run
+
+.. code:: bash
+
+   python src/userfm/main.py +experiment=SimpleHarmonicOscillator model=ModelDiffusion
+
+To train the flow matching model, run
+
+.. code:: bash
+
+   python src/userfm/main.py +experiment=SimpleHarmonicOscillator model=ModelFlowMatching model/conditional_flow=<conditional_flow>
+
+where ``<conditional_flow>`` is replaced with either ``ConditionalOT`` or ``MinibatchOTConditionalOT``.
+
 Lorenz
-------
+^^^^^^
+
+To train the VE-SDE diffusion model, run
+
+.. code:: bash
+
+   python src/userfm/main.py +experiment=Lorenz model=ModelDiffusion
+
+To train the flow matching model, run
+
+.. code:: bash
+
+   python src/userfm/main.py +experiment=Lorenz model=ModelFlowMatching model/conditional_flow=<conditional_flow>
+
+where ``<conditional_flow>`` is replaced with either ``ConditionalOT`` or ``MinibatchOTConditionalOT``.
+
+Fitzhugh-Nagumo
+^^^^^^^^^^^^^^^
+
+To train the VE-SDE diffusion model, run
+
+.. code:: bash
+
+   python src/userfm/main.py +experiment=FitzHughNagumo model=ModelDiffusion
+
+To train the flow matching model, run
+
+.. code:: bash
+
+   python src/userfm/main.py +experiment=FitzHughNagumo model=ModelFlowMatching model/conditional_flow=<conditional_flow>
+
+where ``<conditional_flow>`` is replaced with either ``ConditionalOT`` or ``MinibatchOTConditionalOT``.
+
+Original Code (mostly)
+----------------------
+
+Lorenz
+^^^^^^
 Change ``--workdir`` as needed.
 
 .. code:: bash
@@ -58,7 +141,7 @@ Change ``--workdir`` as needed.
    python src/userdiffusion/main.py --config=src/userdiffusion/config.py --config.dataset=LorenzDataset --workdir=../../out/diffusion-dynamics/pmlr-v202-finzi23a/runs/lorenz/
 
 Fitzhugh-Nagumo
----------------
+^^^^^^^^^^^^^^^
 Change ``--workdir`` as needed.
 
 .. code:: bash
@@ -66,7 +149,7 @@ Change ``--workdir`` as needed.
    python src/userdiffusion/main.py --config=src/userdiffusion/config.py --config.dataset=FitzHughDataset --workdir=../../out/diffusion-dynamics/pmlr-v202-finzi23a/runs/fitzhugh/
 
 Pendulum
---------
+^^^^^^^^
 Change ``--workdir`` as needed.
 
 .. code:: bash
