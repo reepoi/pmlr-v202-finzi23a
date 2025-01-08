@@ -15,16 +15,20 @@
 
 """Core flow matching model implementation, noise schedule, type, and training."""
 
+import functools
 import time
 import logging
 from typing import Any, Callable, Sequence, Union
 
 from flax.core.frozen_dict import FrozenDict
+from flax import linen as nn
 import jax
 from jax import random
 import jax.numpy as jnp
 import numpy as np
 import optax
+
+from userfm import cs, optimal_transport
 
 Scorefn = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
 PRNGKey = jnp.ndarray
@@ -38,6 +42,27 @@ log = logging.getLogger(__file__)
 
 def nonefn(x):  # pylint: disable=unused-argument
     return None
+
+
+class ModelDebug(nn.Module):
+    @nn.compact
+    def __call__(self, x, t, train=True, cond=None):
+        x = x.squeeze(2)
+        t = t[:, None]
+        a = jnp.concat((x, t), axis=1)
+        hidden_dim = 64
+        a = nn.Dense(features=hidden_dim, name='dense0')(a)
+        a = nn.elu(a)
+        a = nn.Dense(features=hidden_dim, name='dense1')(a)
+        a = nn.elu(a)
+        a = nn.Dense(features=hidden_dim, name='dense2')(a)
+        a = nn.elu(a)
+        a = nn.Dense(features=hidden_dim, name='dense3')(a)
+        a = nn.elu(a)
+        a = nn.Dense(features=hidden_dim, name='dense4')(a)
+        a = nn.elu(a)
+        a = nn.Dense(features=1, name='dense5')(a)
+        return a[..., None]
 
 
 def train_flow_matching(
@@ -77,9 +102,16 @@ def train_flow_matching(
     # initialize model
     key, key_model_init = random.split(key)
     x = next(dataloader())
-    t = np.random.rand(x.shape[0])
-    params = model.init(key_model_init, x=x, t=t, train=False, cond=cond_fn(x))
+    params = model.init(
+        key_model_init,
+        x=x, t=jnp.zeros(x.shape[0]),
+        train=False, cond=cond_fn(x),
+    )
     log.info('Param count: %(param_count).2f M', dict(param_count=count_params(params['params']) / 1e6))
+
+    @functools.partial(jax.jit, static_argnames=['train'])
+    def apply_model(params, x, t, train, cond):
+        return model.apply(params, x=x, t=t, train=train, cond=cond)
 
     def loss(params, x_data, key):
         key, key_time = jax.random.split(key)
@@ -88,10 +120,25 @@ def train_flow_matching(
         key, key_noise = jax.random.split(key)
         x_noise = jax.random.normal(key_noise, x_data.shape)
 
-        xt = (1 - (1 - 1e-3) * t) * x_noise + t * x_data
+        if isinstance(cfg.conditional_flow, cs.ConditionalOT):
+            xt = (1 - t) * x_noise + t * x_data
+        elif isinstance(cfg.conditional_flow, cs.MinibatchOTConditionalOT):
+            ot_plan_sampler = optimal_transport.OTPlanSampler(
+                method=cfg.conditional_flow.ot_solver,
+                reg=cfg.conditional_flow.sinkhorn_regularization,
+                reg_m=cfg.conditional_flow.unbalanced_sinkhorn_knopp_regularization,
+                normalize_cost=cfg.conditional_flow.normalize_cost,
+            )
+            x_noise, x_data = ot_plan_sampler.sample_plan(
+                x_noise, x_data, replace=cfg.conditional_flow.sample_with_replacement
+            )
+            xt = (1 - t) * x_noise + t * x_data
+        else:
+            raise ValueError(f'Unknown conditional flow: {cfg.conditional_flow}')
 
-        velocity_target = x_data - (1 - 1e-3) * x_noise
-        velocity_pred = model.apply(params, x=xt, t=t.squeeze((1, 2)), train=True, cond=None)
+        # velocity_pred = model.apply(params, x=xt, t=t.squeeze((1, 2)), train=True, cond=None)
+        velocity_pred = apply_model(params, x=xt, t=t.squeeze((1, 2)), train=True, cond=None)
+        velocity_target = x_data - x_noise
         return ((velocity_pred - velocity_target)**2).mean()
 
     tx = optax.adam(learning_rate=cfg.architecture.learning_rate)
@@ -101,7 +148,7 @@ def train_flow_matching(
     jloss = jax.jit(loss)
     loss_grad_fn = jax.value_and_grad(loss)
 
-    @jax.jit
+    # @jax.jit
     def update_fn(params, ema_params, opt_state, key, data):
         key, key_loss = random.split(key)
         loss_val, grads = loss_grad_fn(params, data, key_loss)
@@ -119,7 +166,7 @@ def train_flow_matching(
                 params, ema_params, opt_state, key, data
             )
         if epoch % 25 == 0:
-            ema_loss = jloss(ema_params, data, key)  # pylint: disable=undefined-loop-variable
+            ema_loss = loss(ema_params, data, key)  # pylint: disable=undefined-loop-variable
             if writer is not None:
                 metrics = {"loss": loss_val, "ema_loss": ema_loss}
                 eval_metrics_cpu = jax.tree_map(np.array, metrics)
@@ -129,12 +176,12 @@ def train_flow_matching(
     if ckpt is not None:
         ckpt.save(model_state)
 
-    @jax.jit
+    # @jax.jit
     def velocity(x, t, cond=None):
         """Trained score function s(xₜ,t):=∇logp(xₜ)."""
         if not hasattr(t, "shape") or not t.shape:
             t = jnp.ones(x.shape[0]) * t
-        velocity_pred = model.apply(ema_params, x=x, t=t, train=False, cond=cond)
+        velocity_pred = apply_model(ema_params, x=x, t=t, train=False, cond=cond)
         return velocity_pred
 
     return velocity

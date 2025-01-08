@@ -261,7 +261,25 @@ class ModelDiffusion(Model):
     sde_diffusion: SDEDiffusion = field(default_factory=SDEVarianceExploding, metadata=dict(sa=orm.relationship(SDEDiffusion.__name__, foreign_keys=[sde_diffusion_id.metadata['sa']])))
 
 
-class ModelFlowMatching(Model):
+class ConditionalFlow(CfgWithTable):
+    __tablename__ = __qualname__
+    __mapper_args__ = dict(
+        polymorphic_on='sa_inheritance',
+        polymorphic_identity=__tablename__,
+    )
+    sa_inheritance: str = field(init=False, repr=False, metadata=dict(
+        sa=sa.Column(sa.String(20), nullable=False),
+        omegaconf_ignore=True,
+    ))
+    _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
+
+    id: int = field(init=False, metadata=dict(
+        sa=sa.Column(sa.Integer, primary_key=True),
+        omegaconf_ignore=True,
+    ))
+
+
+class ConditionalOT(ConditionalFlow):
     __tablename__ = __qualname__
     __mapper_args__ = dict(
         polymorphic_on='sa_inheritance',
@@ -270,9 +288,60 @@ class ModelFlowMatching(Model):
     _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
 
     id: int = field(init=False, metadata=dict(
+        sa=sa.Column(sa.ForeignKey(f'{ConditionalFlow.__name__}.id'), primary_key=True),
+        omegaconf_ignore=True,
+    ))
+
+
+class OTSolver(str, enum.Enum):
+    EXACT = 'exact'  # Earth movers distance
+    SINKHORN = 'sinkhorn'
+    UNBALANCED_SINKHORN_KNOPP = 'unbalanced'
+    PARTIAL = 'partial'
+
+
+class MinibatchOTConditionalOT(ConditionalFlow):
+    __tablename__ = __qualname__
+    __mapper_args__ = dict(
+        polymorphic_on='sa_inheritance',
+        polymorphic_identity=__tablename__,
+    )
+    _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
+
+    id: int = field(init=False, metadata=dict(
+        sa=sa.Column(sa.ForeignKey(f'{ConditionalFlow.__name__}.id'), primary_key=True),
+        omegaconf_ignore=True,
+    ))
+
+    ot_solver: OTSolver = field(default=OTSolver.EXACT, metadata=dict(sa=ColumnRequired(sa.Enum(OTSolver))))
+    sinkhorn_regularization: float = field(default=.05, metadata=dict(sa=ColumnRequired(sa.Double)))
+    unbalanced_sinkhorn_knopp_regularization: float = field(default=1., metadata=dict(sa=ColumnRequired(sa.Double)))
+    normalize_cost: bool = field(default=False, metadata=dict(sa=ColumnRequired(sa.Boolean)))
+    sample_with_replacement: bool = field(default=True, metadata=dict(sa=ColumnRequired(sa.Boolean)))
+
+
+class ModelFlowMatching(Model):
+    __tablename__ = __qualname__
+    __mapper_args__ = dict(
+        polymorphic_on='sa_inheritance',
+        polymorphic_identity=__tablename__,
+    )
+    _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
+    defaults: typing.List[typing.Any] = field(repr=False, default_factory=lambda: [
+        dict(conditional_flow=omegaconf.MISSING),
+        '_self_'
+    ])
+
+    id: int = field(init=False, metadata=dict(
         sa=sa.Column(sa.ForeignKey(f'{Model.__name__}.id'), primary_key=True),
         omegaconf_ignore=True,
     ))
+
+    conditional_flow_id: int = field(init=False, repr=False, metadata=dict(
+        sa=sa.Column(ConditionalFlow.__name__, sa.ForeignKey(f'{ConditionalFlow.__name__}.id'), nullable=False),
+        omegaconf_ignore=True,
+    ))
+    conditional_flow: ConditionalFlow = field(default=omegaconf.MISSING, metadata=dict(sa=orm.relationship(ConditionalFlow.__name__, foreign_keys=[conditional_flow_id.metadata['sa']])))
 
 
 class Config(CfgWithTable):
@@ -340,6 +409,8 @@ cs.store(group=Config.dataset.key, name=DatasetFitzHughNagumo.__name__, node=Dat
 cs.store(group=Config.dataset.key, name=DatasetSimpleHarmonicOscillator.__name__, node=DatasetSimpleHarmonicOscillator)
 cs.store(group=Config.model.key, name=ModelDiffusion.__name__, node=ModelDiffusion)
 cs.store(group=Config.model.key, name=ModelFlowMatching.__name__, node=ModelFlowMatching)
+cs.store(group=f'{Config.model.key}/{ModelFlowMatching.conditional_flow.key}', name=ConditionalOT.__name__, node=ConditionalOT)
+cs.store(group=f'{Config.model.key}/{ModelFlowMatching.conditional_flow.key}', name=MinibatchOTConditionalOT.__name__, node=MinibatchOTConditionalOT)
 cs.store(name=Config.__name__, node=Config)
 
 

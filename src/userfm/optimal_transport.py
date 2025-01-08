@@ -39,12 +39,12 @@ import scipy
 
 
 def cdist(a, b, p=2.0):
-    assert len(np.shape(a)) == 3
+    assert p != np.inf
     assert np.shape(a) == np.shape(b)
     if p == 0:
         return scipy.spatial.distance.cdist(a, b, metric=lambda x, y: np.abs(x - y).max())
     elif p == np.inf:
-        return scipy.spatial.distance.cdist(a, b, metric='hamming') * np.shape(a)[2]
+        return scipy.spatial.distance.cdist(a, b, metric='hamming') * np.shape(a)[-1]
     else:
         return scipy.spatial.distance.cdist(a, b, metric='minkowski', p=p)
 
@@ -118,14 +118,14 @@ class OTPlanSampler:
             represents the OT plan between minibatches
         """
         a, b = pot.unif(x0.shape[0]), pot.unif(x1.shape[0])
-        if x0.dim() > 2:
+        if x0.ndim > 2:
             x0 = x0.reshape(x0.shape[0], -1)
-        if x1.dim() > 2:
+        if x1.ndim > 2:
             x1 = x1.reshape(x1.shape[0], -1)
         M = cdist(x0, x1) ** 2
         if self.normalize_cost:
             M = M / M.max()  # should not be normalized when using minibatches
-        p = self.ot_fn(a, b, M.detach().cpu().numpy())
+        p = self.ot_fn(a, b, M)
         if not np.all(np.isfinite(p)):
             print("ERROR: p is not finite")
             print(p)
@@ -179,7 +179,7 @@ class OTPlanSampler:
         x0[i] : Tensor, shape (bs, *dim)
             represents the source minibatch drawn from $\pi$
         x1[j] : Tensor, shape (bs, *dim)
-            represents the source minibatch drawn from $\pi$
+            represents the target minibatch drawn from $\pi$
         """
         pi = self.get_map(x0, x1)
         i, j = self.sample_map(pi, x0.shape[0], replace=replace)
@@ -294,14 +294,14 @@ def wasserstein(
         raise ValueError(f"Unknown method: {method}")
 
     a, b = pot.unif(x0.shape[0]), pot.unif(x1.shape[0])
-    if x0.dim() > 2:
+    if x0.ndim > 2:
         x0 = x0.reshape(x0.shape[0], -1)
-    if x1.dim() > 2:
+    if x1.ndim > 2:
         x1 = x1.reshape(x1.shape[0], -1)
     M = cdist(x0, x1)
     if power == 2:
         M = M**2
-    ret = ot_fn(a, b, M.detach().cpu().numpy(), numItermax=int(1e7))
+    ret = ot_fn(a, b, M, numItermax=int(1e7))
     if power == 2:
         ret = math.sqrt(ret)
     return ret
