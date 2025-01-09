@@ -64,6 +64,7 @@ class Dataset(CfgWithTable):
     time_step: float  = field(default=.1, metadata=dict(sa=ColumnRequired(sa.Double)))
     time_step_count: int = field(default=100, metadata=dict(sa=ColumnRequired(sa.Integer)))
     time_step_count_drop_first: int = field(default=30, metadata=dict(sa=ColumnRequired(sa.Integer)))
+    time_step_count_conditioning: int = field(default=3, metadata=dict(sa=ColumnRequired(sa.Integer)))
 
     odeint_rtol: float = field(default=1e-6, metadata=dict(sa=ColumnRequired(sa.Double)))
 

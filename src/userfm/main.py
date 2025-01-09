@@ -55,6 +55,12 @@ def pmetric(qs, times, integrate):
     return jnp.exp(log_metric.mean()), std_err
 
 
+def condition_on_initial_time_steps(z, time_step_count):
+    if time_step_count > 0:
+        return z[:, :time_step_count]
+    return None
+
+
 @hydra.main(**utils.HYDRA_INIT)
 def main(cfg):
     engine = cs.get_engine()
@@ -110,20 +116,8 @@ def main(cfg):
                 ckpt=ckpt,
                 writer=writer,
                 key=key_train,
+                cond_fn=functools.partial(condition_on_initial_time_steps, time_step_count=cfg.dataset.time_step_count_conditioning)
             )
-            eval_scorefn = functools.partial(score_fn, cond=None)
-            key, key_eval = jax.random.split(key)
-            nll = samplers.compute_nll(difftype, eval_scorefn, key_eval, test_x).mean()
-            stochastic_samples = samplers.sde_sample(
-                difftype, eval_scorefn, key_eval, test_x.shape,
-                nsteps=1000, traj=False
-            )
-            kstart = 3
-            err = pmetric(stochastic_samples[:, kstart:], ds.T_long[kstart:], ds.integrate)[0]
-
-            log.info('NLL: %(nll).3f, Err: %(err).3f', dict(nll=nll, err=err))
-            eval_metrics_cpu = jax.tree_map(np.array, {"NLL": nll, "err": err})
-            writer.write_scalars(cfg.model.architecture.epochs, eval_metrics_cpu)
         elif isinstance(cfg.model, cs.ModelFlowMatching):
             velocity = flow_matching.train_flow_matching(
                 cfg.model,
@@ -131,6 +125,7 @@ def main(cfg):
                 ckpt=ckpt,
                 writer=writer,
                 key=key_train,
+                cond_fn=functools.partial(condition_on_initial_time_steps, time_step_count=cfg.dataset.time_step_count_conditioning)
             )
         else:
             raise ValueError(f'Unknown model: {cfg.model}')
