@@ -109,10 +109,7 @@ def train_flow_matching(
     )
     log.info('Param count: %(param_count).2f M', dict(param_count=count_params(params['params']) / 1e6))
 
-    @functools.partial(jax.jit, static_argnames=['train'])
-    def apply_model(params, x, t, train, cond):
-        return model.apply(params, x=x, t=t, train=train, cond=cond)
-
+    @jax.jit
     def loss(params, x_data, key):
         key, key_time = jax.random.split(key)
         t = jax.random.uniform(key_time, shape=(x_data.shape[0], 1, 1))
@@ -123,21 +120,18 @@ def train_flow_matching(
         if isinstance(cfg.conditional_flow, cs.ConditionalOT):
             xt = (1 - t) * x_noise + t * x_data
         elif isinstance(cfg.conditional_flow, cs.MinibatchOTConditionalOT):
-            ot_plan_sampler = optimal_transport.OTPlanSampler(
-                method=cfg.conditional_flow.ot_solver,
+            key, key_plan = jax.random.split(key)
+            x_noise, x_data = optimal_transport.OTPlanSamplerJax.sample_plan(
+                key_plan,
+                x_noise, x_data,
                 reg=cfg.conditional_flow.sinkhorn_regularization,
-                reg_m=cfg.conditional_flow.unbalanced_sinkhorn_knopp_regularization,
-                normalize_cost=cfg.conditional_flow.normalize_cost,
-            )
-            x_noise, x_data = ot_plan_sampler.sample_plan(
-                x_noise, x_data, replace=cfg.conditional_flow.sample_with_replacement
+                replace=cfg.conditional_flow.sample_with_replacement,
             )
             xt = (1 - t) * x_noise + t * x_data
         else:
             raise ValueError(f'Unknown conditional flow: {cfg.conditional_flow}')
 
-        # velocity_pred = model.apply(params, x=xt, t=t.squeeze((1, 2)), train=True, cond=None)
-        velocity_pred = apply_model(params, x=xt, t=t.squeeze((1, 2)), train=True, cond=None)
+        velocity_pred = model.apply(params, x=xt, t=t.squeeze((1, 2)), train=True, cond=cond_fn(x_data))
         velocity_target = x_data - x_noise
         return ((velocity_pred - velocity_target)**2).mean()
 
@@ -145,10 +139,9 @@ def train_flow_matching(
     opt_state = tx.init(params)
     ema_ts = cfg.architecture.epochs / num_ema_foldings  # number of ema timescales during training
     ema_params = params
-    jloss = jax.jit(loss)
     loss_grad_fn = jax.value_and_grad(loss)
 
-    # @jax.jit
+    @jax.jit
     def update_fn(params, ema_params, opt_state, key, data):
         key, key_loss = random.split(key)
         loss_val, grads = loss_grad_fn(params, data, key_loss)
@@ -175,16 +168,6 @@ def train_flow_matching(
     model_state = ema_params
     if ckpt is not None:
         ckpt.save(model_state)
-
-    # @jax.jit
-    def velocity(x, t, cond=None):
-        """Trained score function s(xₜ,t):=∇logp(xₜ)."""
-        if not hasattr(t, "shape") or not t.shape:
-            t = jnp.ones(x.shape[0]) * t
-        velocity_pred = apply_model(ema_params, x=x, t=t, train=False, cond=cond)
-        return velocity_pred
-
-    return velocity
 
 
 def count_params(params):
