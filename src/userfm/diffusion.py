@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
+from userdiffusion import samplers
 from userfm import sde_diffusion, utils
 
 log = logging.getLogger(__file__)
@@ -40,6 +41,35 @@ ArrayShape = Sequence[int]
 ParamType = Any
 
 
+class Trainer:
+    def __init__(self, cfg):
+        self.cfg = cfg
+
+    def training_step(self):
+        pass
+
+    def run_training(self):
+        pass
+
+    def validation_step(self):
+        pass
+
+    def run_validation(self):
+        pass
+
+    def predict_step(self):
+        pass
+
+
+def model_init(key, model, x_shape, cond_fn):
+    x = jnp.ones(x_shape)
+    t = jnp.ones(x_shape[0])
+    cond = cond_fn(x)
+    params = model.init(key, x=x, t=t, train=False, cond=cond)
+    return params
+
+
+@jax.jit
 def score(model, params, diffusion, data_std, x, t, train=True, cond=None):
     """Score function with appropriate input and output scaling."""
     # scaling is equivalent to that in Karras et al. https://arxiv.org/abs/2206.00364
@@ -52,11 +82,40 @@ def score(model, params, diffusion, data_std, x, t, train=True, cond=None):
     return out / jnp.sqrt(sigma**2 + scale**2 * data_std**2)
 
 
+@jax.jit
+def loss(key, model, params, diffusion, data_std, x, cond):
+    """Score matching MSE loss from Yang's Score-SDE paper."""
+    # Use lowvar grid time sampling from https://arxiv.org/pdf/2107.00630.pdf
+    # Appendix I
+    key, key_time = jax.random.split(key)
+    u0 = jax.random.uniform(key_time)
+    u = jnp.remainder(u0 + jnp.linspace(0, 1, x.shape[0]), 1)
+    t = u * (diffusion.tmax - diffusion.tmin) + diffusion.tmin
+
+    key, key_noise = jax.random.split(key)
+    xt = diffusion.noise_input(x, t, key_noise)
+    target_score = diffusion.noise_score(xt, x, t)
+    # weighting from Yang Song's https://arxiv.org/abs/2011.13456
+    # Taos: this appears to be using the weighting from Eqn.(1) used for dicrete noise levels.
+    weighting = utils.unsqueeze_like(x, diffusion.sigma(t) ** 2)
+    error = score(model, params, diffusion, data_std, xt, t, cond=cond) - target_score
+    return jnp.mean((diffusion.covsqrt.inverse(error) ** 2) * weighting)
+
+
+@jax.jit
+def update_fn(optimizer, loss_val, grads, params, ema_params, ema_ts, opt_state):
+    updates, opt_state = optimizer.update(grads, opt_state)
+    params = optax.apply_updates(params, updates)
+    ema_update = lambda p, ema: ema + (p - ema) / ema_ts
+    ema_params = jax.tree_map(ema_update, params, ema_params)
+    return params, ema_params, opt_state, loss_val
+
+
 def train_diffusion(
     cfg,
     model,
     diffusion,
-    dataloader,
+    dataloaders,
     data_std,
     cond_fn=lambda _: None,  # function: array -> array or None
     num_ema_foldings=5,
@@ -137,30 +196,42 @@ def train_diffusion(
         ema_params = jax.tree_map(ema_update, params, ema_params)
         return params, ema_params, opt_state, key, loss_val
 
+    @jit
+    def score_out(ema_params, x, t, cond):
+        """Trained score function s(xₜ,t):=∇logp(xₜ)."""
+        if not hasattr(t, "shape") or not t.shape:
+            t = jnp.ones(x.shape[0]) * t
+        return score(model, ema_params, diffusion, data_std, x, t, train=False, cond=cond)
+
+    compute_mean_relative_error = jit(lambda a, b: utils.relative_error(a, b).mean())
+    mean_relative_error = np.inf
     for epoch in range(cfg.architecture.epochs + 1):
-        for i, data in enumerate(dataloader()):
+        for trajectories in dataloaders['train']:
             params, ema_params, opt_state, key, loss_val = update_fn(
-                params, ema_params, opt_state, key, data
+                params, ema_params, opt_state, key, trajectories
             )
+        key, key_ema_loss = jax.random.split(key)
         if epoch % 25 == 0:
-            ema_loss = jloss(ema_params, data, key)  # pylint: disable=undefined-loop-variable
+            ema_loss = jloss(ema_params, trajectories, key)  # pylint: disable=undefined-loop-variable
             if writer is not None:
                 metrics = {"loss": loss_val, "ema_loss": ema_loss}
                 eval_metrics_cpu = jax.tree_map(np.array, metrics)
                 writer.write_scalars(epoch, eval_metrics_cpu)
+        key, key_val_loss = jax.random.split(key)
+        if epoch % 250 == 0:
+            relative_errors = []
+            for trajectories in dataloaders['val']:
+                cond = cond_fn(trajectories)
+                samples = samplers.sde_sample(diffusion, lambda x, t: score_out(ema_params, x, t, cond), key_val_loss, x_shape=x.shape, n_steps=1_000)
+                relative_errors.append(compute_mean_relative_error(trajectories, samples))
+            mean_relative_error = np.array(relative_errors).mean()
+            writer.write_scalars(epoch, dict(mean_relative_error=mean_relative_error))
 
     model_state = ema_params
     if ckpt is not None:
         ckpt.save(model_state)
 
-    @jit
-    def score_out(x, t, cond=None):
-        """Trained score function s(xₜ,t):=∇logp(xₜ)."""
-        if not hasattr(t, "shape") or not t.shape:
-            t = jnp.ones(x.shape[0]) * t
-        return score(ema_params, x, t, train=False, cond=cond)
-
-    return score_out
+    return mean_relative_error
 
 
 def count_params(params):

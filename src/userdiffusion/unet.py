@@ -512,6 +512,9 @@ class UNet(nn.Module):
 
   config: ml_collections.ConfigDict
 
+  def __hash__(self):
+      return hash(id(self))
+
   @nn.compact
   def __call__(self,
                x,

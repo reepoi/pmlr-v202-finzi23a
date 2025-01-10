@@ -57,7 +57,9 @@ class Dataset(CfgWithTable):
         omegaconf_ignore=True,
     ))
 
-    trajectory_count: int = field(default=4500, metadata=dict(sa=ColumnRequired(sa.Integer)))
+    batch_count_train: int = field(default=8, metadata=dict(sa=ColumnRequired(sa.Integer)))
+    batch_count_val: int = field(default=1, metadata=dict(sa=ColumnRequired(sa.Integer)))
+    batch_count_test: int = field(default=1, metadata=dict(sa=ColumnRequired(sa.Integer)))
     batch_size: int = field(default=500, metadata=dict(sa=ColumnRequired(sa.Integer)))
 
     # Trajectory evaluation points and length

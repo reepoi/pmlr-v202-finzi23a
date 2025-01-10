@@ -213,6 +213,9 @@ class Diffusion(abc.ABC):
 class VarianceExploding(Diffusion):
     """Variance exploding variant of Score-SDE diffusion models."""
 
+    def __hash__(self):
+        return hash(id(self))
+
     def sigma(self, t):
         # Taos: similar to Eqn.(31) in
         # Song et al. 2021, "Score-Based Generative Modeling through Stochastic Differential Equations"

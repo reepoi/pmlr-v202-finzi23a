@@ -1,3 +1,7 @@
+import jax
+import jax.numpy as jnp
+
+
 HYDRA_INIT = dict(version_base=None, config_path='../../conf', config_name='config')
 
 
@@ -38,3 +42,16 @@ def unsqueeze_like(x, *objs):
         return objs[
             0
         ]  # if it is a scalar, it already broadcasts to x shape  # pytype: disable=bad-return-type  # jax-ndarray
+
+
+@jax.jit
+def relative_error(x, y, axis=-1):
+    """
+    Compute |x - y|/(|x| + |y|) with L1 norm over the axis `axis`.
+    """
+    return (
+        jnp.abs(x - y).sum(axis)
+        / (jnp.abs(x).sum(axis) + jnp.abs(y).sum(axis))
+    )
+
+

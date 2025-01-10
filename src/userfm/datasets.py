@@ -43,21 +43,22 @@ class GaussianMixture:
         self.cfg = cfg
         self.key = key
 
-        self.T, self.Zs = self.generate_data()
-        self.T_long = self.T
+        self.times, self.trajectories = self.generate_data()
 
     def __len__(self):
-        return self.Zs.shape[0]
+        return self.cfg.batch_size * (
+            self.cfg.batch_count_train + self.cfg.batch_count_val + self.cfg.batch_count_test
+        )
 
     def __getitem__(self, i):
-        return (self.Zs[i, 0], self.T), self.Zs[i]
+        return self.trajectories[i]
 
     def generate_data(self):
         coeffs = [.5, .5]
         means = [-2., 2.]
         stddevs = [-.5, .5]
 
-        x_shape = (self.cfg.trajectory_count, self.cfg.time_step_count, 1)
+        x_shape = (len(self), self.cfg.time_step_count, 1)
 
         self.key, *key_normals = jax.random.split(self.key, num=len(coeffs) + 1)
         normals = []
@@ -67,11 +68,11 @@ class GaussianMixture:
 
         self.key, key_select = jax.random.split(self.key)
         keys_select = jax.random.split(key_select, num=x_shape[0] * x_shape[1])
-        Zs = jax.vmap(jax.random.choice)(keys_select, normals).reshape(x_shape)
+        trajectories = jax.vmap(jax.random.choice)(keys_select, normals).reshape(x_shape)
 
-        T = jnp.zeros(self.cfg.trajectory_count)
+        times = jnp.zeros(x_shape[0])
 
-        return T, Zs
+        return times, trajectories
 
 
 class ODEDataset(abc.ABC):
@@ -89,7 +90,7 @@ class ODEDataset(abc.ABC):
       burnin_time: amount of time to discard for burnin for the given dataset
 
     Attributes:
-      Zs: state variables z for each trajectory, of shape (N, L, C)
+      trajectories: state variables z for each trajectory, of shape (N, L, C)
       T_long: full integration timesteps, of shape (L, )
       T: the integration timesteps for chunk if chunk_len is specified, same as
         T_long if chunk_len not specified, otherwise of shape (chunk_len,)
@@ -101,14 +102,15 @@ class ODEDataset(abc.ABC):
         self.cfg = cfg
         self.key = key
 
-        self.T, self.Zs = self.generate_trajectory_data()
-        self.T_long = self.T
+        self.times, self.trajectories = self.generate_trajectory_data()
 
     def __len__(self):
-        return self.Zs.shape[0]
+        return self.cfg.batch_size * (
+            self.cfg.batch_count_train + self.cfg.batch_count_val + self.cfg.batch_count_test
+        )
 
     def __getitem__(self, i):
-        return (self.Zs[i, 0], self.T), self.Zs[i]
+        return self.trajectories[i]
 
     def integrate(self, z0s, ts, tol=1e-4):
         # Taos: only used for `def animation`
@@ -119,7 +121,7 @@ class ODEDataset(abc.ABC):
     def generate_trajectory_data(self):
         """Returns ts: (N, traj_len) zs: (N, traj_len, z_dim)."""
         n_gen = 0
-        device_batch_size = min(self.cfg.device_batch_size, self.cfg.trajectory_count)
+        device_batch_size = min(self.cfg.device_batch_size, len(self))
         z_batches = []
         mesh = Mesh(mesh_utils.create_device_mesh((device_count(),)), ("data",))
         # odeint_rtol
@@ -130,14 +132,14 @@ class ODEDataset(abc.ABC):
         # batched_dynamics = jit(vmap(self.dynamics, (0, None)))
         num_devices = len(mesh.devices)
         with mesh:
-            for _ in tqdm(range(0, self.cfg.trajectory_count, device_batch_size * num_devices)):
+            for _ in tqdm(range(0, len(self), device_batch_size * num_devices)):
                 z0s = self.sample_initial_conditions(device_batch_size * num_devices)
                 time_step_indices = jnp.arange(0, self.cfg.time_step_count)
                 new_zs = jintegrate(z0s, self.cfg.time_step * time_step_indices)
                 new_zs = new_zs[:, time_step_indices >= self.cfg.time_step_count_drop_first]
                 z_batches.append(new_zs)
                 n_gen += device_batch_size
-        zs = jnp.concatenate(z_batches, axis=0)[:self.cfg.trajectory_count]
+        zs = jnp.concatenate(z_batches, axis=0)[:len(self)]
         time_step_indices = jnp.arange(0, self.cfg.time_step_count)
         times = self.cfg.time_step * time_step_indices
         times = times[time_step_indices >= self.cfg.time_step_count_drop_first]
@@ -178,7 +180,7 @@ class ODEDataset(abc.ABC):
         """
         if zt is None:
             zt = np.asarray(
-                self.integrate(self.sample_initial_conditions(10)[0], self.T_long)
+                self.integrate(self.sample_initial_conditions(10)[0], self.times)
             )
         anim = self.animator(zt)
         return anim.animate()
@@ -277,10 +279,10 @@ class HamiltonianDataset(ODEDataset):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # convert the momentum into velocity
-        qs, ps = unpack(self.Zs)
+        qs, ps = unpack(self.trajectories)
         Ms = vmap(vmap(self.mass))(qs)  # pylint: disable=invalid-name
         vs = jnp.linalg.solve(Ms, ps)
-        self.Zs = pack(qs, vs)
+        self.trajectories = pack(qs, vs)
 
     def dynamics(self, z, t):
         return hamiltonian_dynamics(self.hamiltonian, z)
@@ -296,7 +298,7 @@ class HamiltonianDataset(ODEDataset):
     def animate(self, zt=None):  # type: ignore  # jax-ndarray
         if zt is None:
             zt = np.asarray(
-                self.integrate(self.sample_initial_conditions(10)[0], self.T_long)
+                self.integrate(self.sample_initial_conditions(10)[0], self.times)
             )
         # bs, T, 2nd
         if len(zt.shape) == 3:
@@ -390,6 +392,13 @@ def get_dataset(cfg, key=None, rng_seed=None):
         return NPendulum(cfg, key=key)
     else:
         raise ValueError(f'Unknown dataset: {cfg}')
+
+
+def split_dataset(cfg, dataset):
+    batch_counts = jnp.array([cfg.batch_count_train, cfg.batch_count_val, cfg.batch_count_test])
+    splits = jnp.split(dataset.trajectories, jnp.cumsum(cfg.batch_size * batch_counts))
+    assert sum(map(len, splits)) == len(dataset)
+    return {n: s for n, s in zip(('train', 'val', 'test'), splits)}
 
 
 @hydra.main(**utils.HYDRA_INIT)
