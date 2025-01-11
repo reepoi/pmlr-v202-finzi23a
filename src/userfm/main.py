@@ -108,7 +108,7 @@ class JaxLightning(pl.LightningModule):
         )
         # use same key to ensure identical sampling
         loss_ema = self.loss(key_train, batch, cond, self.params_ema)
-        self.optimizers()  # increment global step for logging and checkpointing
+        self.optimizers().step()  # increment global step for logging and checkpointing
         return dict(
             loss=torch.tensor(loss.item()),
             loss_ema=torch.tensor(loss_ema.item()),
@@ -126,7 +126,7 @@ class JaxLightning(pl.LightningModule):
                 t = jnp.ones(x.shape[0]) * t
             return self.score(x, t, cond, self.params)
 
-        samples = samplers.sde_sample(self.diffusion, score, key_val, x_shape=batch.shape, nsteps=1_000)
+        samples = samplers.sde_sample(self.diffusion, score, key_val, x_shape=batch.shape, nsteps=self.cfg.model.sde_time_steps)
         return dict(
             val_relative_error=torch.tensor(einops.reduce(utils.relative_error(batch, samples), 'b t ->', 'mean').item()),
         )
@@ -204,18 +204,10 @@ def main(cfg):
             )
         dataloaders = {}
         for n, s in splits.items():
-            dataloaders[n] = (
-                torch.utils.data.dataloader.DataLoader(
-                    list(tf.data.Dataset.from_tensor_slices(s).batch(cfg.dataset.batch_size).as_numpy_iterator()),
-                    batch_size=1,
-                    collate_fn=lambda x: x[0],
-                    # batch_size=cfg.dataset.batch_size,
-                    # collate_fn=lambda x: jnp.stack(x)
-                )
-                # tf.data.Dataset.from_tensor_slices(s)
-                # .shuffle(len(s))
-                # .batch(cfg.dataset.batch_size)
-                # .as_numpy_iterator
+            dataloaders[n] = torch.utils.data.dataloader.DataLoader(
+                list(tf.data.Dataset.from_tensor_slices(s).batch(cfg.dataset.batch_size).as_numpy_iterator()),
+                batch_size=1,
+                collate_fn=lambda x: x[0],
             )
 
         cfg_unet = unet.unet_64_config(
@@ -231,13 +223,13 @@ def main(cfg):
         cond_fn = functools.partial(condition_on_initial_time_steps, time_step_count=cfg.dataset.time_step_count_conditioning)
         key, key_trainer = jax.random.split(key)
         if isinstance(cfg.model, cs.ModelDiffusion):
-            trainer = JaxLightning(cfg, key_trainer, dataloaders, train_data_std, cond_fn, model)
+            jax_lightning = JaxLightning(cfg, key_trainer, dataloaders, train_data_std, cond_fn, model)
         elif isinstance(cfg.model, cs.ModelFlowMatching):
-            trainer = flow_matching.Trainer(cfg)
+            pass
         else:
             raise ValueError(f'Unknown model: {cfg.model}')
 
-        logger = pl.loggers.TensorBoardLogger(cfg.run_dir, version=0)
+        logger = pl.loggers.TensorBoardLogger(cfg.run_dir, name='tensorboard_logs', version=0)
 
         pl_trainer = pl.Trainer(
             max_epochs=cfg.model.architecture.epochs,
@@ -247,19 +239,19 @@ def main(cfg):
                 callbacks.ModelCheckpoint(
                     dirpath=cfg.run_dir,
                     filename='{epoch}',
-                    save_last=True,
                     save_top_k=2,
                     monitor='val_relative_error',
                     save_on_train_epoch_end=False,
+                    enable_version_counter=False,
                 ),
                 callbacks.LogStats(),
             ],
             log_every_n_steps=1,
-            check_val_every_n_epoch=25,
+            check_val_every_n_epoch=cfg.check_val_every_n_epoch,
             deterministic=True,
         )
 
-        pl_trainer.fit(trainer)
+        pl_trainer.fit(jax_lightning)
 
 
 def get_run_dir(hydra_init=utils.HYDRA_INIT, commit=True):

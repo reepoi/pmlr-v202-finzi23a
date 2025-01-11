@@ -257,6 +257,8 @@ class ModelDiffusion(Model):
         omegaconf_ignore=True,
     ))
 
+    sde_time_steps: int = field(default=1000, metadata=dict(sa=ColumnRequired(sa.Integer)))
+
     sde_diffusion_id: int = field(init=False, repr=False, metadata=dict(
         sa=sa.Column(SDEDiffusion.__name__, sa.ForeignKey(f'{SDEDiffusion.__name__}.id'), nullable=False),
         omegaconf_ignore=True,
@@ -375,6 +377,7 @@ class Config(CfgWithTable):
     rng_seed: int = field(default=42, metadata=dict(sa=ColumnRequired(sa.Integer)))
     fit: bool = field(default=True, metadata=dict(sa=ColumnRequired(sa.Boolean)))
     predict: bool = field(default=False, metadata=dict(sa=ColumnRequired(sa.Boolean)))
+    check_val_every_n_epoch: int = field(default=100, metadata=dict(sa=ColumnRequired(sa.Integer)))
 
     model_id: int = field(init=False, repr=False, metadata=dict(
         sa=sa.Column(Model.__name__, sa.ForeignKey(f'{Model.__name__}.id'), nullable=False),
