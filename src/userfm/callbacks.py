@@ -1,31 +1,13 @@
+import lightning.pytorch as pl
 
 
-class Callback:
-    def __init__(self):
-        pass
+class LogStats(pl.callbacks.Callback):
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        self.log('train_loss', outputs['loss'], batch_size=len(batch), on_epoch=True, prog_bar=True)
 
-    def before_training_step(self, i, batch):
-        pass
-
-    def after_training_step(self, i, batch, outputs):
-        pass
-
-    def before_training_epoch(self, epoch):
-        pass
-
-    def after_training_epoch(self, epoch):
-        pass
+    def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        self.log('val_relative_error', outputs['val_relative_error'], batch_size=len(batch), on_epoch=True, prog_bar=True)
 
 
-class LogLoss(Callback):
-    def __init__(self, writer):
-        super().__init__()
-        self.writer = writer
-
-    def after_training_step(self, i, batch, outputs):
-        self.loss = outputs['loss']
-
-    def after_training_epoch(self, epoch):
-        if epoch + 1 % 25 == 0:
-            self.writer.write_scalars(epoch, dict(loss=self.loss))
-
+class ModelCheckpoint(pl.callbacks.ModelCheckpoint):
+    CHECKPOINT_EQUALS_CHAR = '_'

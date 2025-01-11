@@ -5,12 +5,14 @@ import sys
 
 import hydra
 from omegaconf import OmegaConf
-import numpy as np
 import tensorflow as tf
+import einops
+import torch
+import torch.utils.data.dataloader
+import numpy as np
 import jax
 import jax.numpy as jnp
-import clu.checkpoint
-import clu.metric_writers
+import lightning.pytorch as pl
 import optax
 
 from userdiffusion import samplers, unet
@@ -51,22 +53,28 @@ def condition_on_initial_time_steps(z, time_step_count):
     return None
 
 
-class Trainer:
-    def __init__(self, cfg, train_data_std, x_shape, cond_fn, model):
+class Trainer(pl.LightningModule):
+    def __init__(self, cfg, key, dataloaders, train_data_std, cond_fn, model):
+        super().__init__()
+        self.automatic_optimization = False
+
         self.cfg = cfg
+        self.key = key
+        self.dataloaders = dataloaders
         self.train_data_std = train_data_std
-        self.x_shape = x_shape
+        self.x_shape = next(iter(dataloaders['train'])).shape
         self.cond_fn = cond_fn
         self.model = model
 
         self.diffusion = sde_diffusion.get_sde_diffusion(self.cfg.model.sde_diffusion)
         self.ema_ts = self.cfg.model.architecture.epochs / 5  # num_ema_foldings  # number of ema timescales during training
 
-    def setup(self, key, stage):
-        if stage == 'train':
-            self.params = self.model_init(key, self.x_shape, self.cond_fn, self.model)
+    def setup(self, stage):
+        if stage == 'fit':
+            self.key, key_train = jax.random.split(self.key)
+            self.params = self.model_init(key_train, self.x_shape, self.cond_fn, self.model)
             self.ema_params = self.params
-            self.optimizer, self.opt_state = self.configure_optimizer(self.params)
+            # self.optimizer, self.opt_state = self.configure_optimizers(self.params)
         elif stage == 'val':
             pass
         else:
@@ -79,29 +87,41 @@ class Trainer:
         params = model.init(key, x=x, t=t, train=False, cond=cond)
         return params
 
-    def configure_optimizer(self, params):
-        optimizer = optax.adam(learning_rate=self.cfg.model.architecture.learning_rate)
-        opt_state = optimizer.init(params)
-        return optimizer, opt_state
+    def configure_optimizers(self):
+        self.optimizer = optax.adam(learning_rate=self.cfg.model.architecture.learning_rate)
+        self.opt_state = self.optimizer.init(self.params)
 
-    def training_step(self, key, i, batch):
+    def train_dataloader(self):
+        return self.dataloaders['train']
+
+    def training_step(self, batch, batch_idx):
+        self.key, key_train = jax.random.split(self.key)
         loss, self.params, self.ema_params, self.opt_state = Trainer.step(
-            key, batch, self.train_data_std, self.cond_fn(batch),
+            key_train, batch, self.train_data_std, self.cond_fn(batch),
             self.model, self.params, self.ema_params, self.ema_ts,
             self.diffusion,
             self.optimizer, self.opt_state,
         )
-        return dict(loss=loss)
 
-    def validation_step(self, key, i, trajectories):
-        cond = self.cond_fn(trajectories)
+        self.optimizers()  # increment global step for logging and checkpointing
+        return dict(loss=torch.tensor(loss.item()))
+
+    def val_dataloader(self):
+        # from pytorch_lightning.utilities import CombinedLoader
+        return self.dataloaders['val']
+
+    def validation_step(self, batch, batch_idx):
+        self.key, key_val = jax.random.split(self.key)
+        cond = self.cond_fn(batch)
         def score(x, t):
             if not hasattr(t, "shape") or not t.shape:
                 t = jnp.ones(x.shape[0]) * t
             return Trainer.score(x, t, self.train_data_std, cond, self.model, self.params, self.diffusion, train=False)
 
-        samples = samplers.sde_sample(self.diffusion, score, key, x_shape=trajectories.shape, nsteps=1_000)
-        utils.relative_error(trajectories, samples)
+        samples = samplers.sde_sample(self.diffusion, score, key_val, x_shape=batch.shape, nsteps=1_000)
+        return dict(
+            val_relative_error=torch.tensor(einops.reduce(utils.relative_error(batch, samples), 'b t ->', 'mean').item()),
+        )
 
     def predict_step(self):
         pass
@@ -147,7 +167,7 @@ class Trainer:
         updates, opt_state = optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
         ema_update = lambda p, ema: ema + (p - ema) / ema_ts
-        ema_params = jax.tree_map(ema_update, params, ema_params)
+        ema_params = jax.tree.map(ema_update, params, ema_params)
         return loss, params, ema_params, opt_state
 
 
@@ -181,10 +201,17 @@ def main(cfg):
         dataloaders = {}
         for n, s in splits.items():
             dataloaders[n] = (
-                tf.data.Dataset.from_tensor_slices(s)
-                .shuffle(len(s))
-                .batch(cfg.dataset.batch_size)
-                .as_numpy_iterator
+                torch.utils.data.dataloader.DataLoader(
+                    list(tf.data.Dataset.from_tensor_slices(s).batch(cfg.dataset.batch_size).as_numpy_iterator()),
+                    batch_size=1,
+                    collate_fn=lambda x: x[0],
+                    # batch_size=cfg.dataset.batch_size,
+                    # collate_fn=lambda x: jnp.stack(x)
+                )
+                # tf.data.Dataset.from_tensor_slices(s)
+                # .shuffle(len(s))
+                # .batch(cfg.dataset.batch_size)
+                # .as_numpy_iterator
             )
 
         cfg_unet = unet.unet_64_config(
@@ -194,47 +221,40 @@ def main(cfg):
         )
         model = unet.UNet(cfg_unet)
 
-        writer = clu.metric_writers.create_default_writer(
-            logdir=str(cfg.run_dir), just_logging=jax.process_index() != 0
-        )
-        ckpt = clu.checkpoint.MultihostCheckpoint(str(cfg.run_dir/'model-checkpoints'), {}, max_to_keep=2)
-
         train_data_std = splits['train'].std()
         log.info('Training set standard deviation: %(data_std).7f', dict(data_std=train_data_std))
 
         cond_fn = functools.partial(condition_on_initial_time_steps, time_step_count=cfg.dataset.time_step_count_conditioning)
+        key, key_trainer = jax.random.split(key)
         if isinstance(cfg.model, cs.ModelDiffusion):
-            trainer = Trainer(cfg, train_data_std, (cfg.dataset.batch_size, *splits['train'].shape[1:]), cond_fn, model)
+            trainer = Trainer(cfg, key_trainer, dataloaders, train_data_std, cond_fn, model)
         elif isinstance(cfg.model, cs.ModelFlowMatching):
             trainer = flow_matching.Trainer(cfg)
         else:
             raise ValueError(f'Unknown model: {cfg.model}')
 
-        key, key_setup = jax.random.split(key)
-        trainer.setup(key, 'train')
-        key, key_val_sanity = jax.random.split(key)
-        for i, batch in zip(range(2), dataloaders['val']()):
-            trainer.validation_step(key_val_sanity, i, batch)
+        logger = pl.loggers.TensorBoardLogger(cfg.run_dir, version=0)
 
-        cbs = [callbacks.LogLoss(writer)]
-        for epoch in range(cfg.model.architecture.epochs):
-            for c in cbs:
-                c.before_training_epoch(epoch)
-            for i, batch in enumerate(dataloaders['train']()):
-                key, key_train = jax.random.split(key)
-                for c in cbs:
-                    c.before_training_step(i, batch)
-                outputs = trainer.training_step(key_train, i, batch)
-                for c in cbs:
-                    c.after_training_step(i, batch, outputs)
-            for c in cbs:
-                c.after_training_epoch(epoch)
-            key, key_val = jax.random.split(key)
-            if epoch + 1 % 250 == 0:
-                for i, batch in enumerate(dataloaders['val']()):
-                    trainer.validation_step(key_val, i, batch)
-                #     trainer.event_after_validation_step(i, trajectories)
-                # trainer.event_after_validation(epoch)
+        pl_trainer = pl.Trainer(
+            max_epochs=cfg.model.architecture.epochs,
+            logger=logger,
+            precision=32,
+            callbacks=[
+                callbacks.ModelCheckpoint(
+                    dirpath=cfg.run_dir,
+                    filename='{epoch}',
+                    save_last=True,
+                    save_top_k=2,
+                    monitor='val_relative_error',
+                    save_on_train_epoch_end=False,
+                ),
+                callbacks.LogStats(),
+            ],
+            check_val_every_n_epoch=25,
+            deterministic=True,
+        )
+
+        pl_trainer.fit(trainer)
 
 
 def get_run_dir(hydra_init=utils.HYDRA_INIT, commit=True):

@@ -41,26 +41,6 @@ ArrayShape = Sequence[int]
 ParamType = Any
 
 
-class Trainer:
-    def __init__(self, cfg):
-        self.cfg = cfg
-
-    def training_step(self):
-        pass
-
-    def run_training(self):
-        pass
-
-    def validation_step(self):
-        pass
-
-    def run_validation(self):
-        pass
-
-    def predict_step(self):
-        pass
-
-
 def model_init(key, model, x_shape, cond_fn):
     x = jnp.ones(x_shape)
     t = jnp.ones(x_shape[0])
