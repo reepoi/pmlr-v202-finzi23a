@@ -163,6 +163,7 @@ class ModelArchitecture(CfgWithTable):
 
     epochs: int = field(default=10_000, metadata=dict(sa=ColumnRequired(sa.Integer)))
     learning_rate: float = field(default=1e-4, metadata=dict(sa=ColumnRequired(sa.Double)))
+    ema_folding_count: int = field(default=5, metadata=dict(sa=ColumnRequired(sa.Integer)))
 
 
 class UNet(ModelArchitecture):
@@ -347,6 +348,8 @@ class ModelFlowMatching(Model):
         omegaconf_ignore=True,
     ))
     conditional_flow: ConditionalFlow = field(default=omegaconf.MISSING, metadata=dict(sa=orm.relationship(ConditionalFlow.__name__, foreign_keys=[conditional_flow_id.metadata['sa']])))
+
+    ode_time_steps: int = field(default=1000, metadata=dict(sa=ColumnRequired(sa.Integer)))
 
 
 class Config(CfgWithTable):

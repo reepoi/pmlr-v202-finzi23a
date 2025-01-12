@@ -53,128 +53,6 @@ def condition_on_initial_time_steps(z, time_step_count):
     return None
 
 
-class JaxLightning(pl.LightningModule):
-    def __init__(self, cfg, key, dataloaders, train_data_std, cond_fn, model):
-        super().__init__()
-        self.automatic_optimization = False
-
-        self.cfg = cfg
-        self.key = key
-        self.dataloaders = dataloaders
-        self.train_data_std = train_data_std
-        self.x_shape = next(iter(dataloaders['train'])).shape
-        self.cond_fn = cond_fn
-        self.model = model
-
-        self.diffusion = sde_diffusion.get_sde_diffusion(self.cfg.model.sde_diffusion)
-        self.ema_ts = self.cfg.model.architecture.epochs / 5  # num_ema_foldings  # number of ema timescales during training
-
-        self.loss_and_grad = jax.value_and_grad(self.loss, argnums=3)
-
-    def __hash__(self):
-        return hash(id(self))
-
-    def setup(self, stage):
-        if stage == 'fit':
-            self.key, key_train = jax.random.split(self.key)
-            self.params = self.model_init(key_train, self.x_shape, self.cond_fn, self.model)
-            self.params_ema = self.params
-        elif stage == 'val':
-            pass
-        else:
-            raise ValueError(f'Unknown stage: {stage}')
-
-    def model_init(self, key, x_shape, cond_fn, model):
-        x = jnp.ones(x_shape)
-        t = jnp.ones(x_shape[0])
-        cond = cond_fn(x)
-        params = model.init(key, x=x, t=t, train=False, cond=cond)
-        return params
-
-    def configure_optimizers(self):
-        self.optimizer = optax.adam(learning_rate=self.cfg.model.architecture.learning_rate)
-        self.opt_state = self.optimizer.init(self.params)
-
-    def train_dataloader(self):
-        return self.dataloaders['train']
-
-    def training_step(self, batch, batch_idx):
-        cond = self.cond_fn(batch)
-        self.key, key_train = jax.random.split(self.key)
-        loss, self.params, self.params_ema, self.opt_state = self.step(
-            key_train, batch, cond,
-            self.params, self.params_ema,
-            self.opt_state,
-        )
-        # use same key to ensure identical sampling
-        loss_ema = self.loss(key_train, batch, cond, self.params_ema)
-        self.optimizers().step()  # increment global step for logging and checkpointing
-        return dict(
-            loss=torch.tensor(loss.item()),
-            loss_ema=torch.tensor(loss_ema.item()),
-        )
-
-    def val_dataloader(self):
-        # from pytorch_lightning.utilities import CombinedLoader
-        return self.dataloaders['val']
-
-    def validation_step(self, batch, batch_idx):
-        self.key, key_val = jax.random.split(self.key)
-        cond = self.cond_fn(batch)
-        def score(x, t):
-            if not hasattr(t, "shape") or not t.shape:
-                t = jnp.ones(x.shape[0]) * t
-            return self.score(x, t, cond, self.params)
-
-        samples = samplers.sde_sample(self.diffusion, score, key_val, x_shape=batch.shape, nsteps=self.cfg.model.sde_time_steps)
-        return dict(
-            val_relative_error=torch.tensor(einops.reduce(utils.relative_error(batch, samples), 'b t ->', 'mean').item()),
-        )
-
-    def predict_step(self):
-        pass
-
-    @functools.partial(jax.jit, static_argnames=['self', 'train'])
-    def score(self, x, t, cond, params, train=False):
-        """Score function with appropriate input and output scaling."""
-        # scaling is equivalent to that in Karras et al. https://arxiv.org/abs/2206.00364
-        sigma, scale = utils.unsqueeze_like(x, self.diffusion.sigma(t), self.diffusion.scale(t))
-        # Taos: Karras et al. $c_in$ and $s(t)$ of EDM.
-        input_scale = 1 / jnp.sqrt(sigma**2 + (scale * self.train_data_std) ** 2)
-        cond = cond / self.train_data_std if cond is not None else None
-        out = self.model.apply(params, x=x * input_scale, t=t, train=train, cond=cond)
-        # Taos: Karras et al. the demonimator of $c_out$ of EDM; where is the numerator?
-        return out / jnp.sqrt(sigma**2 + scale**2 * self.train_data_std**2)
-
-    @functools.partial(jax.jit, static_argnames=['self'])
-    def loss(self, key, x_data, cond, params):
-        """Score matching MSE loss from Yang's Score-SDE paper."""
-        # Use lowvar grid time sampling from https://arxiv.org/pdf/2107.00630.pdf
-        # Appendix I
-        key, key_time = jax.random.split(key)
-        u0 = jax.random.uniform(key_time)
-        u = jnp.remainder(u0 + jnp.linspace(0, 1, x_data.shape[0]), 1)
-        t = u * (self.diffusion.tmax - self.diffusion.tmin) + self.diffusion.tmin
-
-        key, key_noise = jax.random.split(key)
-        xt = self.diffusion.noise_input(x_data, t, key_noise)
-        target_score = self.diffusion.noise_score(xt, x_data, t)
-        # weighting from Yang Song's https://arxiv.org/abs/2011.13456
-        # Taos: this appears to be using the weighting from Eqn.(1) used for discrete noise levels.
-        weighting = utils.unsqueeze_like(x_data, self.diffusion.sigma(t)**2)
-        error = self.score(xt, t, cond, params, train=True) - target_score
-        return jnp.mean((self.diffusion.covsqrt.inverse(error)**2) * weighting)
-
-    @functools.partial(jax.jit, static_argnames=['self'])
-    def step(self, key, batch, cond, params, params_ema, opt_state):
-        loss, grads = self.loss_and_grad(key, batch, cond, params)
-        updates, opt_state = self.optimizer.update(grads, opt_state)
-        params = optax.apply_updates(params, updates)
-        ema_update = lambda p, ema: ema + (p - ema) / self.ema_ts
-        params_ema = jax.tree.map(ema_update, params, params_ema)
-        return loss, params, params_ema, opt_state
-
-
 @hydra.main(**utils.HYDRA_INIT)
 def main(cfg):
     engine = cs.get_engine()
@@ -223,13 +101,13 @@ def main(cfg):
         cond_fn = functools.partial(condition_on_initial_time_steps, time_step_count=cfg.dataset.time_step_count_conditioning)
         key, key_trainer = jax.random.split(key)
         if isinstance(cfg.model, cs.ModelDiffusion):
-            jax_lightning = JaxLightning(cfg, key_trainer, dataloaders, train_data_std, cond_fn, model)
+            jax_lightning = diffusion.JaxLightning(cfg, key_trainer, dataloaders, train_data_std, cond_fn, model)
         elif isinstance(cfg.model, cs.ModelFlowMatching):
-            pass
+            jax_lightning = flow_matching.JaxLightning(cfg, key_trainer, dataloaders, train_data_std, cond_fn, model)
         else:
             raise ValueError(f'Unknown model: {cfg.model}')
 
-        logger = pl.loggers.TensorBoardLogger(cfg.run_dir, name='tensorboard_logs', version=0)
+        logger = pl.loggers.TensorBoardLogger(cfg.run_dir, name='', version='tb_logs')
 
         pl_trainer = pl.Trainer(
             max_epochs=cfg.model.architecture.epochs,

@@ -1,224 +1,137 @@
-# coding=utf-8
-# Copyright 2023 The Google Research Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""Core diffusion model implementation, noise schedule, type, and training."""
-
-import time
+import functools
 import logging
-from typing import Any, Callable, Iterator, List, Optional, Sequence, Union
 
-from flax import linen as nn
-from flax.core.frozen_dict import FrozenDict
+import einops
 import jax
-from jax import grad
-from jax import jit
-from jax import random
 import jax.numpy as jnp
-import numpy as np
+import torch
+import lightning.pytorch as pl
 import optax
 
 from userdiffusion import samplers
 from userfm import sde_diffusion, utils
 
+
 log = logging.getLogger(__file__)
 
-Scorefn = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
-PRNGKey = jnp.ndarray
-TimeType = Union[float, jnp.ndarray]
-ArrayShape = Sequence[int]
-ParamType = Any
 
+class JaxLightning(pl.LightningModule):
+    def __init__(self, cfg, key, dataloaders, train_data_std, cond_fn, model):
+        super().__init__()
+        self.automatic_optimization = False
 
-def model_init(key, model, x_shape, cond_fn):
-    x = jnp.ones(x_shape)
-    t = jnp.ones(x_shape[0])
-    cond = cond_fn(x)
-    params = model.init(key, x=x, t=t, train=False, cond=cond)
-    return params
+        self.cfg = cfg
+        self.key = key
+        self.dataloaders = dataloaders
+        self.train_data_std = train_data_std
+        self.x_shape = next(iter(dataloaders['train'])).shape
+        self.cond_fn = cond_fn
+        self.model = model
 
+        self.diffusion = sde_diffusion.get_sde_diffusion(self.cfg.model.sde_diffusion)
+        self.ema_ts = self.cfg.model.architecture.epochs / self.cfg.model.architecture.ema_folding_count
 
-@jax.jit
-def score(model, params, diffusion, data_std, x, t, train=True, cond=None):
-    """Score function with appropriate input and output scaling."""
-    # scaling is equivalent to that in Karras et al. https://arxiv.org/abs/2206.00364
-    sigma, scale = utils.unsqueeze_like(x, diffusion.sigma(t), diffusion.scale(t))
-    # Taos: Karras et al. $c_in$ and $s(t)$ of EDM.
-    input_scale = 1 / jnp.sqrt(sigma**2 + (scale * data_std) ** 2)
-    cond = cond / data_std if cond is not None else None
-    out = model.apply(params, x=x * input_scale, t=t, train=train, cond=cond)
-    # Taos: Karras et al. the demonimator of $c_out$ of EDM; where is the numerator?
-    return out / jnp.sqrt(sigma**2 + scale**2 * data_std**2)
+        self.loss_and_grad = jax.value_and_grad(self.loss, argnums=3)
 
+    def __hash__(self):
+        return hash(id(self))
 
-@jax.jit
-def loss(key, model, params, diffusion, data_std, x, cond):
-    """Score matching MSE loss from Yang's Score-SDE paper."""
-    # Use lowvar grid time sampling from https://arxiv.org/pdf/2107.00630.pdf
-    # Appendix I
-    key, key_time = jax.random.split(key)
-    u0 = jax.random.uniform(key_time)
-    u = jnp.remainder(u0 + jnp.linspace(0, 1, x.shape[0]), 1)
-    t = u * (diffusion.tmax - diffusion.tmin) + diffusion.tmin
+    def setup(self, stage):
+        if stage == 'fit':
+            self.key, key_train = jax.random.split(self.key)
+            self.params = self.model_init(key_train, self.x_shape, self.cond_fn, self.model)
+            self.params_ema = self.params
+        elif stage == 'val':
+            pass
+        else:
+            raise ValueError(f'Unknown stage: {stage}')
 
-    key, key_noise = jax.random.split(key)
-    xt = diffusion.noise_input(x, t, key_noise)
-    target_score = diffusion.noise_score(xt, x, t)
-    # weighting from Yang Song's https://arxiv.org/abs/2011.13456
-    # Taos: this appears to be using the weighting from Eqn.(1) used for dicrete noise levels.
-    weighting = utils.unsqueeze_like(x, diffusion.sigma(t) ** 2)
-    error = score(model, params, diffusion, data_std, xt, t, cond=cond) - target_score
-    return jnp.mean((diffusion.covsqrt.inverse(error) ** 2) * weighting)
+    def model_init(self, key, x_shape, cond_fn, model):
+        x = jnp.ones(x_shape)
+        t = jnp.ones(x_shape[0])
+        cond = cond_fn(x)
+        params = model.init(key, x=x, t=t, train=False, cond=cond)
+        return params
 
+    def configure_optimizers(self):
+        self.optimizer = optax.adam(learning_rate=self.cfg.model.architecture.learning_rate)
+        self.opt_state = self.optimizer.init(self.params)
 
-@jax.jit
-def update_fn(optimizer, loss_val, grads, params, ema_params, ema_ts, opt_state):
-    updates, opt_state = optimizer.update(grads, opt_state)
-    params = optax.apply_updates(params, updates)
-    ema_update = lambda p, ema: ema + (p - ema) / ema_ts
-    ema_params = jax.tree_map(ema_update, params, ema_params)
-    return params, ema_params, opt_state, loss_val
+    def train_dataloader(self):
+        return self.dataloaders['train']
 
+    def training_step(self, batch, batch_idx):
+        cond = self.cond_fn(batch)
+        self.key, key_train = jax.random.split(self.key)
+        loss, self.params, self.params_ema, self.opt_state = self.step(
+            key_train, batch, cond,
+            self.params, self.params_ema,
+            self.opt_state,
+        )
+        # use same key to ensure identical sampling
+        loss_ema = self.loss(key_train, batch, cond, self.params_ema)
+        self.optimizers().step()  # increment global step for logging and checkpointing
+        return dict(
+            loss=torch.tensor(loss.item()),
+            loss_ema=torch.tensor(loss_ema.item()),
+        )
 
-def train_diffusion(
-    cfg,
-    model,
-    diffusion,
-    dataloaders,
-    data_std,
-    cond_fn=lambda _: None,  # function: array -> array or None
-    num_ema_foldings=5,
-    writer=None,
-    report=None,
-    ckpt=None,
-    key=None,
-    rng_seed=None,  # to avoid initing jax
-):
-    """Train diffusion model with score matching according to diffusion type.
+    def val_dataloader(self):
+        # from pytorch_lightning.utilities import CombinedLoader
+        return self.dataloaders['val']
 
-    Minimizes score matching MSE loss between the model scores s(xₜ,t)
-    and the data scores ∇log p(xₜ|x₀) over noised datapoints xₜ, with t sampled
-    uniformly from 0 to 1, and x sampled from the training distribution.
-    Produces score function s(xₜ,t) ≈ ∇log p(xₜ) which can be used for sampling.
+    def validation_step(self, batch, batch_idx):
+        self.key, key_val = jax.random.split(self.key)
+        cond = self.cond_fn(batch)
+        def score(x, t):
+            if not hasattr(t, "shape") or not t.shape:
+                t = jnp.ones(x.shape[0]) * t
+            return self.score(x, t, cond, self.params)
 
-    Loss = 𝔼[|s(xₜ,t) − ∇log p(xₜ|x₀)|²σₜ²]
+        samples = samplers.sde_sample(self.diffusion, score, key_val, x_shape=batch.shape, nsteps=self.cfg.model.sde_time_steps)
+        return dict(
+            val_relative_error=torch.tensor(einops.reduce(utils.relative_error(batch, samples), 'b t ->', 'mean').item()),
+        )
 
-    Args:
-      model: UNet mapping (x,t,train,cond) -> x'
-      dataloader: callable which produces an iterator for the minibatches
-      data_std: standard deviation of training data for input normalization
-      epochs: number of epochs to train
-      lr: learning rate
-      diffusion: diffusion object (VarianceExploding, VariancePreserving, etc)
-      cond_fn: (optional) function cond_fn(x) to condition training on
-      num_ema_foldings: number of ema timescales per total number of epochs
-      writer: optional summary_writer to log to if not None
-      report: optional report function to call if not None
-      ckpt: optional clu.checkpoint to save the model. If None, does not save
-      seed: random seed for model init and training
+    def predict_step(self):
+        pass
 
-    Returns:
-      score function (xt,t,cond)->scores (s(xₜ,t):=∇logp(xₜ))
-    """
-    # initialize model
-    x = next(dataloader())
-    t = np.random.rand(x.shape[0])
-    if key is None:
-        key = jax.random.key(rng_seed)
-    key, init_seed = random.split(key)
-    params = model.init(init_seed, x=x, t=t, train=False, cond=cond_fn(x))
-    log.info(f"{count_params(params['params'])/1e6:.2f}M Params")  # pylint: disable=logging-fstring-interpolation
+    @functools.partial(jax.jit, static_argnames=['self', 'train'])
+    def score(self, x, t, cond, params, train=False):
+        """Score function with appropriate input and output scaling."""
+        # scaling is equivalent to that in Karras et al. https://arxiv.org/abs/2206.00364
+        sigma, scale = utils.unsqueeze_like(x, self.diffusion.sigma(t), self.diffusion.scale(t))
+        # Taos: Karras et al. $c_in$ and $s(t)$ of EDM.
+        input_scale = 1 / jnp.sqrt(sigma**2 + (scale * self.train_data_std) ** 2)
+        cond = cond / self.train_data_std if cond is not None else None
+        out = self.model.apply(params, x=x * input_scale, t=t, train=train, cond=cond)
+        # Taos: Karras et al. the demonimator of $c_out$ of EDM; where is the numerator?
+        return out / jnp.sqrt(sigma**2 + scale**2 * self.train_data_std**2)
 
-    def loss(params, x, key):
+    @functools.partial(jax.jit, static_argnames=['self'])
+    def loss(self, key, x_data, cond, params):
         """Score matching MSE loss from Yang's Score-SDE paper."""
         # Use lowvar grid time sampling from https://arxiv.org/pdf/2107.00630.pdf
         # Appendix I
         key, key_time = jax.random.split(key)
         u0 = jax.random.uniform(key_time)
-        u = jnp.remainder(u0 + jnp.linspace(0, 1, x.shape[0]), 1)
-        t = u * (diffusion.tmax - diffusion.tmin) + diffusion.tmin
+        u = jnp.remainder(u0 + jnp.linspace(0, 1, x_data.shape[0]), 1)
+        t = u * (self.diffusion.tmax - self.diffusion.tmin) + self.diffusion.tmin
 
         key, key_noise = jax.random.split(key)
-        xt = diffusion.noise_input(x, t, key_noise)
-        target_score = diffusion.noise_score(xt, x, t)
+        xt = self.diffusion.noise_input(x_data, t, key_noise)
+        target_score = self.diffusion.noise_score(xt, x_data, t)
         # weighting from Yang Song's https://arxiv.org/abs/2011.13456
-        # Taos: this appears to be using the weighting from Eqn.(1) used for dicrete noise levels.
-        weighting = utils.unsqueeze_like(x, diffusion.sigma(t) ** 2)
-        error = score(model, params, diffusion, data_std, xt, t, cond=cond_fn(x)) - target_score
-        return jnp.mean((diffusion.covsqrt.inverse(error) ** 2) * weighting)
+        # Taos: this appears to be using the weighting from Eqn.(1) used for discrete noise levels.
+        weighting = utils.unsqueeze_like(x_data, self.diffusion.sigma(t)**2)
+        error = self.score(xt, t, cond, params, train=True) - target_score
+        return jnp.mean((self.diffusion.covsqrt.inverse(error)**2) * weighting)
 
-    tx = optax.adam(learning_rate=cfg.architecture.learning_rate)
-    opt_state = tx.init(params)
-    ema_ts = cfg.architecture.epochs / num_ema_foldings  # number of ema timescales during training
-    ema_params = params
-    jloss = jit(loss)
-    loss_grad_fn = jax.value_and_grad(loss)
-
-    @jit
-    def update_fn(params, ema_params, opt_state, key, data):
-        key, key_loss = random.split(key)
-        loss_val, grads = loss_grad_fn(params, data, key_loss)
-
-        updates, opt_state = tx.update(grads, opt_state)
+    @functools.partial(jax.jit, static_argnames=['self'])
+    def step(self, key, batch, cond, params, params_ema, opt_state):
+        loss, grads = self.loss_and_grad(key, batch, cond, params)
+        updates, opt_state = self.optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
-        ema_update = lambda p, ema: ema + (p - ema) / ema_ts
-        ema_params = jax.tree_map(ema_update, params, ema_params)
-        return params, ema_params, opt_state, key, loss_val
-
-    @jit
-    def score_out(ema_params, x, t, cond):
-        """Trained score function s(xₜ,t):=∇logp(xₜ)."""
-        if not hasattr(t, "shape") or not t.shape:
-            t = jnp.ones(x.shape[0]) * t
-        return score(model, ema_params, diffusion, data_std, x, t, train=False, cond=cond)
-
-    compute_mean_relative_error = jit(lambda a, b: utils.relative_error(a, b).mean())
-    mean_relative_error = np.inf
-    for epoch in range(cfg.architecture.epochs + 1):
-        for trajectories in dataloaders['train']:
-            params, ema_params, opt_state, key, loss_val = update_fn(
-                params, ema_params, opt_state, key, trajectories
-            )
-        key, key_ema_loss = jax.random.split(key)
-        if epoch % 25 == 0:
-            ema_loss = jloss(ema_params, trajectories, key)  # pylint: disable=undefined-loop-variable
-            if writer is not None:
-                metrics = {"loss": loss_val, "ema_loss": ema_loss}
-                eval_metrics_cpu = jax.tree_map(np.array, metrics)
-                writer.write_scalars(epoch, eval_metrics_cpu)
-        key, key_val_loss = jax.random.split(key)
-        if epoch % 250 == 0:
-            relative_errors = []
-            for trajectories in dataloaders['val']:
-                cond = cond_fn(trajectories)
-                samples = samplers.sde_sample(diffusion, lambda x, t: score_out(ema_params, x, t, cond), key_val_loss, x_shape=x.shape, n_steps=1_000)
-                relative_errors.append(compute_mean_relative_error(trajectories, samples))
-            mean_relative_error = np.array(relative_errors).mean()
-            writer.write_scalars(epoch, dict(mean_relative_error=mean_relative_error))
-
-    model_state = ema_params
-    if ckpt is not None:
-        ckpt.save(model_state)
-
-    return mean_relative_error
-
-
-def count_params(params):
-    """Count the number of parameters in the flax model param dict."""
-    if isinstance(params, jax.numpy.ndarray):
-        return np.prod(params.shape)
-    elif isinstance(params, (dict, FrozenDict)):
-        return sum([count_params(v) for v in params.values()])
-    else:
-        assert False, type(params)
+        ema_update = lambda p, ema: ema + (p - ema) / self.ema_ts
+        params_ema = jax.tree.map(ema_update, params, params_ema)
+        return loss, params, params_ema, opt_state

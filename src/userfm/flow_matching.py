@@ -1,180 +1,135 @@
-# coding=utf-8
-# Copyright 2023 The Google Research Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""Core flow matching model implementation, noise schedule, type, and training."""
-
 import functools
-import time
 import logging
-from typing import Any, Callable, Sequence, Union
 
-from flax.core.frozen_dict import FrozenDict
-from flax import linen as nn
+import einops
 import jax
-from jax import random
 import jax.numpy as jnp
-import numpy as np
+import torch
+import lightning.pytorch as pl
 import optax
 
-from userfm import cs, optimal_transport
-
-Scorefn = Callable[[jnp.ndarray, jnp.ndarray], jnp.ndarray]
-PRNGKey = jnp.ndarray
-TimeType = Union[float, jnp.ndarray]
-ArrayShape = Sequence[int]
-ParamType = Any
+from userdiffusion import samplers
+from userfm import cs, optimal_transport, utils
 
 
 log = logging.getLogger(__file__)
 
 
-def nonefn(x):  # pylint: disable=unused-argument
-    return None
+class JaxLightning(pl.LightningModule):
+    def __init__(self, cfg, key, dataloaders, train_data_std, cond_fn, model):
+        super().__init__()
+        self.automatic_optimization = False
 
+        self.cfg = cfg
+        self.key = key
+        self.dataloaders = dataloaders
+        self.train_data_std = train_data_std
+        self.x_shape = next(iter(dataloaders['train'])).shape
+        self.cond_fn = cond_fn
+        self.model = model
 
-class ModelDebug(nn.Module):
-    @nn.compact
-    def __call__(self, x, t, train=True, cond=None):
-        x = x.squeeze(2)
-        t = t[:, None]
-        a = jnp.concat((x, t), axis=1)
-        hidden_dim = 64
-        a = nn.Dense(features=hidden_dim, name='dense0')(a)
-        a = nn.elu(a)
-        a = nn.Dense(features=hidden_dim, name='dense1')(a)
-        a = nn.elu(a)
-        a = nn.Dense(features=hidden_dim, name='dense2')(a)
-        a = nn.elu(a)
-        a = nn.Dense(features=hidden_dim, name='dense3')(a)
-        a = nn.elu(a)
-        a = nn.Dense(features=hidden_dim, name='dense4')(a)
-        a = nn.elu(a)
-        a = nn.Dense(features=1, name='dense5')(a)
-        return a[..., None]
+        self.ema_ts = self.cfg.model.architecture.epochs / self.cfg.model.architecture.ema_folding_count
 
+        self.loss_and_grad = jax.value_and_grad(self.loss, argnums=3)
 
-def train_flow_matching(
-    cfg,
-    model,
-    dataloader,
-    data_std,
-    cond_fn=lambda _: None,  # function: array -> array or None
-    num_ema_foldings=5,  # Taos: todo: add this to config
-    writer=None,
-    report=None,
-    ckpt=None,
-    key=None,
-    rng_seed=None,  # to avoid initing jax
-):
-    """Train flow matching model with according to diffusion type.
+    def __hash__(self):
+        return hash(id(self))
 
-    Args:
-      model: UNet mapping (x,t,train,cond) -> x'
-      dataloader: callable which produces an iterator for the minibatches
-      data_std: standard deviation of training data for input normalization
-      epochs: number of epochs to train
-      lr: learning rate
-      diffusion: diffusion object (VarianceExploding, VariancePreserving, etc)
-      cond_fn: (optional) function cond_fn(x) to condition training on
-      num_ema_foldings: number of ema timescales per total number of epochs
-      writer: optional summary_writer to log to if not None
-      report: optional report function to call if not None
-      ckpt: optional clu.checkpoint to save the model. If None, does not save
-      seed: random seed for model init and training
+    def setup(self, stage):
+        if stage == 'fit':
+            self.key, key_train = jax.random.split(self.key)
+            self.params = self.model_init(key_train, self.x_shape, self.cond_fn, self.model)
+            self.params_ema = self.params
+        elif stage == 'val':
+            pass
+        else:
+            raise ValueError(f'Unknown stage: {stage}')
 
-    Returns:
-      score function (xt,t,cond)->scores (s(xₜ,t):=∇logp(xₜ))
-    """
-    if key is None:
-        key = jax.random.key(rng_seed)
-    # initialize model
-    key, key_model_init = random.split(key)
-    x = next(dataloader())
-    params = model.init(
-        key_model_init,
-        x=x, t=jnp.zeros(x.shape[0]),
-        train=False, cond=cond_fn(x),
-    )
-    log.info('Param count: %(param_count).2f M', dict(param_count=count_params(params['params']) / 1e6))
+    def model_init(self, key, x_shape, cond_fn, model):
+        x = jnp.ones(x_shape)
+        t = jnp.ones(x_shape[0])
+        cond = cond_fn(x)
+        params = model.init(key, x=x, t=t, train=False, cond=cond)
+        return params
 
-    @jax.jit
-    def loss(params, x_data, key):
+    def configure_optimizers(self):
+        self.optimizer = optax.adam(learning_rate=self.cfg.model.architecture.learning_rate)
+        self.opt_state = self.optimizer.init(self.params)
+
+    def train_dataloader(self):
+        return self.dataloaders['train']
+
+    def training_step(self, batch, batch_idx):
+        cond = self.cond_fn(batch)
+        self.key, key_train = jax.random.split(self.key)
+        loss, self.params, self.params_ema, self.opt_state = self.step(
+            key_train, batch, cond,
+            self.params, self.params_ema,
+            self.opt_state,
+        )
+        # use same key to ensure identical sampling
+        loss_ema = self.loss(key_train, batch, cond, self.params_ema)
+        self.optimizers().step()  # increment global step for logging and checkpointing
+        return dict(
+            loss=torch.tensor(loss.item()),
+            loss_ema=torch.tensor(loss_ema.item()),
+        )
+
+    def val_dataloader(self):
+        # from pytorch_lightning.utilities import CombinedLoader
+        return self.dataloaders['val']
+
+    def validation_step(self, batch, batch_idx):
+        self.key, key_val = jax.random.split(self.key)
+        cond = self.cond_fn(batch)
+        def velocity(x, t):
+            if not hasattr(t, 'shape') or not t.shape:
+                t = jnp.ones(x.shape[0]) * t
+            return self.velocity(x, t, cond, self.params)
+
+        samples = samplers.ode_sample_taos(velocity, 1., key_val, x_shape=batch.shape, nsteps=self.cfg.model.ode_time_steps)
+        return dict(
+            val_relative_error=torch.tensor(einops.reduce(utils.relative_error(batch, samples), 'b t ->', 'mean').item()),
+        )
+
+    def predict_step(self):
+        pass
+
+    @functools.partial(jax.jit, static_argnames=['self', 'train'])
+    def velocity(self, x, t, cond, params, train=False):
+        return -self.model.apply(params, x=x, t=t, train=train, cond=cond)
+
+    @functools.partial(jax.jit, static_argnames=['self'])
+    def loss(self, key, x_data, cond, params):
         key, key_time = jax.random.split(key)
         t = jax.random.uniform(key_time, shape=(x_data.shape[0], 1, 1))
 
         key, key_noise = jax.random.split(key)
         x_noise = jax.random.normal(key_noise, x_data.shape)
 
-        if isinstance(cfg.conditional_flow, cs.ConditionalOT):
+        if isinstance(self.cfg.model.conditional_flow, cs.ConditionalOT):
             xt = (1 - t) * x_noise + t * x_data
-        elif isinstance(cfg.conditional_flow, cs.MinibatchOTConditionalOT):
+        elif isinstance(self.cfg.model.conditional_flow, cs.MinibatchOTConditionalOT):
             key, key_plan = jax.random.split(key)
             x_noise, x_data = optimal_transport.OTPlanSamplerJax.sample_plan(
                 key_plan,
                 x_noise, x_data,
-                reg=cfg.conditional_flow.sinkhorn_regularization,
-                replace=cfg.conditional_flow.sample_with_replacement,
+                reg=self.cfg.model.conditional_flow.sinkhorn_regularization,
+                replace=self.cfg.model.conditional_flow.sample_with_replacement,
             )
             xt = (1 - t) * x_noise + t * x_data
         else:
-            raise ValueError(f'Unknown conditional flow: {cfg.conditional_flow}')
+            raise ValueError(f'Unknown conditional flow: {self.cfg.model.conditional_flow}')
 
-        velocity_pred = model.apply(params, x=xt, t=t.squeeze((1, 2)), train=True, cond=cond_fn(x_data))
+        velocity_pred = self.velocity(xt, t.squeeze((1, 2)), cond, params, train=True)
         velocity_target = x_data - x_noise
         return ((velocity_pred - velocity_target)**2).mean()
 
-    tx = optax.adam(learning_rate=cfg.architecture.learning_rate)
-    opt_state = tx.init(params)
-    ema_ts = cfg.architecture.epochs / num_ema_foldings  # number of ema timescales during training
-    ema_params = params
-    loss_grad_fn = jax.value_and_grad(loss)
-
-    @jax.jit
-    def update_fn(params, ema_params, opt_state, key, data):
-        key, key_loss = random.split(key)
-        loss_val, grads = loss_grad_fn(params, data, key_loss)
-
-        updates, opt_state = tx.update(grads, opt_state)
+    @functools.partial(jax.jit, static_argnames=['self'])
+    def step(self, key, batch, cond, params, params_ema, opt_state):
+        loss, grads = self.loss_and_grad(key, batch, cond, params)
+        updates, opt_state = self.optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
-        ema_update = lambda p, ema: ema + (p - ema) / ema_ts
-        ema_params = jax.tree_map(ema_update, params, ema_params)
-
-        return params, ema_params, opt_state, key, loss_val
-
-    for epoch in range(cfg.architecture.epochs + 1):
-        for i, data in enumerate(dataloader()):
-            params, ema_params, opt_state, key, loss_val = update_fn(
-                params, ema_params, opt_state, key, data
-            )
-        if epoch % 25 == 0:
-            ema_loss = loss(ema_params, data, key)  # pylint: disable=undefined-loop-variable
-            if writer is not None:
-                metrics = {"loss": loss_val, "ema_loss": ema_loss}
-                eval_metrics_cpu = jax.tree_map(np.array, metrics)
-                writer.write_scalars(epoch, eval_metrics_cpu)
-
-    model_state = ema_params
-    if ckpt is not None:
-        ckpt.save(model_state)
-
-
-def count_params(params):
-    """Count the number of parameters in the flax model param dict."""
-    if isinstance(params, jax.numpy.ndarray):
-        return np.prod(params.shape)
-    elif isinstance(params, (dict, FrozenDict)):
-        return sum([count_params(v) for v in params.values()])
-    else:
-        assert False, type(params)
+        ema_update = lambda p, ema: ema + (p - ema) / self.ema_ts
+        params_ema = jax.tree.map(ema_update, params, params_ema)
+        return loss, params, params_ema, opt_state
