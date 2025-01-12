@@ -88,6 +88,10 @@ class JaxLightning(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         self.key, key_val = jax.random.split(self.key)
+        if self.cfg.dataset.time_step_count_conditioning == 0:
+            return dict(
+                val_relative_error=torch.tensor(0.),
+            )
         cond = self.cond_fn(batch)
         def velocity(x, t):
             if not hasattr(t, 'shape') or not t.shape:
