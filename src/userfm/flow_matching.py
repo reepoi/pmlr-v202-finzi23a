@@ -15,6 +15,13 @@ from userfm import cs, optimal_transport, utils
 log = logging.getLogger(__file__)
 
 
+def heun_sample(key, tmax, velocity, x_shape, nsteps=1000, traj=False):
+  x_noise = jax.random.normal(key, x_shape)
+  timesteps = (.5 + jnp.arange(nsteps)) / nsteps
+  x0, xs = samplers.heun_integrate(velocity, x_noise, timesteps)
+  return xs if traj else x0
+
+
 class JaxLightning(pl.LightningModule):
     def __init__(self, cfg, key, dataloaders, train_data_std, cond_fn, model):
         super().__init__()
@@ -87,7 +94,7 @@ class JaxLightning(pl.LightningModule):
                 t = jnp.ones(x.shape[0]) * t
             return self.velocity(x, t, cond, self.params)
 
-        samples = samplers.ode_sample_taos(velocity, 1., key_val, x_shape=batch.shape, nsteps=self.cfg.model.ode_time_steps)
+        samples = heun_sample(key_val, 1., velocity, x_shape=batch.shape, nsteps=self.cfg.model.ode_time_steps)
         return dict(
             val_relative_error=torch.tensor(einops.reduce(utils.relative_error(batch, samples), 'b t ->', 'mean').item()),
         )
@@ -97,7 +104,7 @@ class JaxLightning(pl.LightningModule):
 
     @functools.partial(jax.jit, static_argnames=['self', 'train'])
     def velocity(self, x, t, cond, params, train=False):
-        return -self.model.apply(params, x=x, t=t, train=train, cond=cond)
+        return self.model.apply(params, x=x, t=t, train=train, cond=cond)
 
     @functools.partial(jax.jit, static_argnames=['self'])
     def loss(self, key, x_data, cond, params):
