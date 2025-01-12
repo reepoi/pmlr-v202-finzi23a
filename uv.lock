@@ -3666,7 +3666,7 @@ requires-dist = [
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "sqlalchemy", specifier = "==2.0.36" },
     { name = "tensorflow", extras = ["and-cuda"], specifier = ">=2.18.0" },
-    { name = "torch", specifier = ">=2.0.1", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torch", specifier = ">=2.5", index = "https://download.pytorch.org/whl/cpu" },
     { name = "tqdm", specifier = ">=4.67.1" },
 ]
 
