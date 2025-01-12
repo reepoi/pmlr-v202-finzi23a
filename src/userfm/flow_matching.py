@@ -96,7 +96,7 @@ class JaxLightning(pl.LightningModule):
         def velocity(x, t):
             if not hasattr(t, 'shape') or not t.shape:
                 t = jnp.ones(x.shape[0]) * t
-            return self.velocity(x, t, cond, self.params)
+            return self.velocity(x, t, cond, self.params_ema)
 
         samples = heun_sample(key_val, 1., velocity, x_shape=batch.shape, nsteps=self.cfg.model.ode_time_steps)
         return dict(

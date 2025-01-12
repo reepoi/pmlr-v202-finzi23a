@@ -117,8 +117,9 @@ def main(cfg):
                 callbacks.ModelCheckpoint(
                     dirpath=cfg.run_dir,
                     filename='{epoch}',
-                    save_top_k=2,
-                    monitor='val_relative_error',
+                    save_top_k=1,
+                    monitor='val_relative_error' if cfg.dataset.time_step_count_conditioning > 0 else 'train_loss_ema',
+                    save_last='link',
                     save_on_train_epoch_end=False,
                     enable_version_counter=False,
                 ),

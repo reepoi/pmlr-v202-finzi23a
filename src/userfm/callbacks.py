@@ -44,3 +44,11 @@ class ModelCheckpoint(pl.callbacks.ModelCheckpoint):
         """Calls the strategy to remove the checkpoint file."""
         for directory in self.get_checkpoint_directories(filepath):
             shutil.rmtree(directory)
+
+    @staticmethod
+    def _link_checkpoint(trainer: "pl.Trainer", filepath: str, linkpath: str) -> None:
+        lp = Path(linkpath)
+        linkpath = lp.parent/lp.stem
+        linkpath_ema = lp.parent/f'{lp.stem}_ema'
+        for directory, lp in zip(ModelCheckpoint.get_checkpoint_directories(filepath), (linkpath, linkpath_ema)):
+            pl.callbacks.ModelCheckpoint._link_checkpoint(trainer, directory, lp)

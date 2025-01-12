@@ -90,7 +90,7 @@ class JaxLightning(pl.LightningModule):
         def score(x, t):
             if not hasattr(t, "shape") or not t.shape:
                 t = jnp.ones(x.shape[0]) * t
-            return self.score(x, t, cond, self.params)
+            return self.score(x, t, cond, self.params_ema)
 
         samples = samplers.sde_sample(self.diffusion, score, key_val, x_shape=batch.shape, nsteps=self.cfg.model.sde_time_steps)
         return dict(
