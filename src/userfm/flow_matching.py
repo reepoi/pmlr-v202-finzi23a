@@ -34,7 +34,8 @@ class JaxLightning(pl.LightningModule):
         self.x_shape = next(iter(dataloaders['train'])).shape
         self.cond_fn = cond_fn
         self.model = model
-        self.diffusion = sde_diffusion.get_sde_diffusion(self.cfg.model.conditional_flow.sde_diffusion)
+        if isinstance(self.cfg.model.conditional_flow, cs.ConditionalSDE):
+            self.diffusion = sde_diffusion.get_sde_diffusion(self.cfg.model.conditional_flow.sde_diffusion)
 
         self.ema_ts = self.cfg.model.architecture.epochs / self.cfg.model.architecture.ema_folding_count
 
@@ -142,8 +143,8 @@ class JaxLightning(pl.LightningModule):
         # sigma = self.diffusion.sigma(1 - t)
         # minus_dsigma = jax.vmap(self.diffusion.sigma)((1 - t).squeeze((1, 2)))[:, None, None]
         xt = x_data + sigma * x_noise
-        velocity_target = minus_dsigma * x_noise
-        # velocity_target = minus_dsigma / sigma * (xt - x_data)
+        # velocity_target = minus_dsigma * x_noise
+        velocity_target = minus_dsigma / sigma * (xt - x_data)
         # sigma = self.diffusion.sigma(1 - t)
         # xt = x_data + sigma * x_noise
         # minus_dsigma = jax.vmap(self.diffusion.sigma)((1 - t).squeeze((1, 2)))[:, None, None]
@@ -170,13 +171,13 @@ class JaxLightning(pl.LightningModule):
             key, key_plan = jax.random.split(key)
             xt, velocity_target = self.minimatch_ot_conditional_ot(key_plan, t, x_noise, x_data)
         elif isinstance(self.cfg.model.conditional_flow, cs.ConditionalSDE):
-            key, key_time = jax.random.split(key)
-            u0 = jax.random.uniform(key_time)
-            u = jnp.remainder(u0 + jnp.linspace(0, 1, x_data.shape[0]), 1)
-            t = u * (self.diffusion.tmax - self.diffusion.tmin) + self.diffusion.tmin
-            t = t[:, None, None]
             # key, key_time = jax.random.split(key)
-            # t = jax.random.uniform(key_time, shape=(x_data.shape[0], 1, 1))
+            # u0 = jax.random.uniform(key_time)
+            # u = jnp.remainder(u0 + jnp.linspace(0, 1, x_data.shape[0]), 1)
+            # t = u * (self.diffusion.tmax - self.diffusion.tmin) + self.diffusion.tmin
+            # t = t[:, None, None]
+            key, key_time = jax.random.split(key)
+            t = jax.random.uniform(key_time, shape=(x_data.shape[0], 1, 1))
 
             key, key_noise = jax.random.split(key)
             x_noise = jax.random.normal(key_noise, x_data.shape)
