@@ -326,6 +326,26 @@ class MinibatchOTConditionalOT(ConditionalFlow):
     sample_with_replacement: bool = field(default=True, metadata=dict(sa=ColumnRequired(sa.Boolean)))
 
 
+class ConditionalSDE(ConditionalFlow):
+    __tablename__ = __qualname__
+    __mapper_args__ = dict(
+        polymorphic_on='sa_inheritance',
+        polymorphic_identity=__tablename__,
+    )
+    _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
+
+    id: int = field(init=False, metadata=dict(
+        sa=sa.Column(sa.ForeignKey(f'{ConditionalFlow.__name__}.id'), primary_key=True),
+        omegaconf_ignore=True,
+    ))
+
+    sde_diffusion_id: int = field(init=False, repr=False, metadata=dict(
+        sa=sa.Column(SDEDiffusion.__name__, sa.ForeignKey(f'{SDEDiffusion.__name__}.id'), nullable=False),
+        omegaconf_ignore=True,
+    ))
+    sde_diffusion: SDEDiffusion = field(default_factory=SDEVarianceExploding, metadata=dict(sa=orm.relationship(SDEDiffusion.__name__, foreign_keys=[sde_diffusion_id.metadata['sa']])))
+
+
 class ModelFlowMatching(Model):
     __tablename__ = __qualname__
     __mapper_args__ = dict(
@@ -420,6 +440,7 @@ cs.store(group=Config.model.key, name=ModelDiffusion.__name__, node=ModelDiffusi
 cs.store(group=Config.model.key, name=ModelFlowMatching.__name__, node=ModelFlowMatching)
 cs.store(group=f'{Config.model.key}/{ModelFlowMatching.conditional_flow.key}', name=ConditionalOT.__name__, node=ConditionalOT)
 cs.store(group=f'{Config.model.key}/{ModelFlowMatching.conditional_flow.key}', name=MinibatchOTConditionalOT.__name__, node=MinibatchOTConditionalOT)
+cs.store(group=f'{Config.model.key}/{ModelFlowMatching.conditional_flow.key}', name=ConditionalSDE.__name__, node=ConditionalSDE)
 cs.store(name=Config.__name__, node=Config)
 
 

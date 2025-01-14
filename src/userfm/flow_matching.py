@@ -9,7 +9,7 @@ import lightning.pytorch as pl
 import optax
 
 from userdiffusion import samplers
-from userfm import cs, optimal_transport, utils
+from userfm import cs, optimal_transport, sde_diffusion, utils
 
 
 log = logging.getLogger(__file__)
@@ -34,6 +34,7 @@ class JaxLightning(pl.LightningModule):
         self.x_shape = next(iter(dataloaders['train'])).shape
         self.cond_fn = cond_fn
         self.model = model
+        self.diffusion = sde_diffusion.get_sde_diffusion(self.cfg.model.conditional_flow.sde_diffusion)
 
         self.ema_ts = self.cfg.model.architecture.epochs / self.cfg.model.architecture.ema_folding_count
 
@@ -96,7 +97,13 @@ class JaxLightning(pl.LightningModule):
         def velocity(x, t):
             if not hasattr(t, 'shape') or not t.shape:
                 t = jnp.ones(x.shape[0]) * t
-            return self.velocity(x, t, cond, self.params_ema)
+            if isinstance(self.cfg.model.conditional_flow, cs.ConditionalSDE):
+                if isinstance(self.cfg.model.conditional_flow.sde_diffusion, cs.SDEVarianceExploding):
+                    return -self.velocity(x, t, cond, self.params_ema)
+                else:
+                    raise ValueError(f'Unknown SDE diffusion: {self.cfg.model.conditional_flow.sde_diffusion}')
+            else:
+                return self.velocity(x, t, cond, self.params_ema)
 
         samples = heun_sample(key_val, 1., velocity, x_shape=batch.shape, nsteps=self.cfg.model.ode_time_steps)
         return dict(
@@ -111,29 +118,78 @@ class JaxLightning(pl.LightningModule):
         return self.model.apply(params, x=x, t=t, train=train, cond=cond)
 
     @functools.partial(jax.jit, static_argnames=['self'])
+    def conditional_ot(self, t, x_noise, x_data):
+        xt = (1 - t) * x_noise + t * x_data
+        velocity_target = x_data - x_noise
+        return xt, velocity_target
+
+    @functools.partial(jax.jit, static_argnames=['self'])
+    def minimatch_ot_conditional_ot(self, key, t, x_noise, x_data):
+        x_noise, x_data = optimal_transport.OTPlanSamplerJax.sample_plan(
+            key,
+            x_noise, x_data,
+            reg=self.cfg.model.conditional_flow.sinkhorn_regularization,
+            replace=self.cfg.model.conditional_flow.sample_with_replacement,
+        )
+        return self.conditional_ot(t, x_noise, x_data)
+
+    @functools.partial(jax.jit, static_argnames=['self'])
+    def variance_exploding_conditional(self, t, x_noise, x_data):
+        sigma, minus_dsigma = jax.vmap(jax.value_and_grad(self.diffusion.sigma))(
+            (1 - t).squeeze((1, 2))
+        )
+        sigma, minus_dsigma = sigma[:, None, None], minus_dsigma[:, None, None]
+        # sigma = self.diffusion.sigma(1 - t)
+        # minus_dsigma = jax.vmap(self.diffusion.sigma)((1 - t).squeeze((1, 2)))[:, None, None]
+        xt = x_data + sigma * x_noise
+        velocity_target = minus_dsigma * x_noise
+        # velocity_target = minus_dsigma / sigma * (xt - x_data)
+        # sigma = self.diffusion.sigma(1 - t)
+        # xt = x_data + sigma * x_noise
+        # minus_dsigma = jax.vmap(self.diffusion.sigma)((1 - t).squeeze((1, 2)))[:, None, None]
+        # velocity_target = minus_dsigma / sigma * (xt - x_data)
+        return xt, velocity_target
+
+    @functools.partial(jax.jit, static_argnames=['self'])
     def loss(self, key, x_data, cond, params):
-        key, key_time = jax.random.split(key)
-        t = jax.random.uniform(key_time, shape=(x_data.shape[0], 1, 1))
-
-        key, key_noise = jax.random.split(key)
-        x_noise = jax.random.normal(key_noise, x_data.shape)
-
         if isinstance(self.cfg.model.conditional_flow, cs.ConditionalOT):
-            xt = (1 - t) * x_noise + t * x_data
+            key, key_time = jax.random.split(key)
+            t = jax.random.uniform(key_time, shape=(x_data.shape[0], 1, 1))
+
+            key, key_noise = jax.random.split(key)
+            x_noise = jax.random.normal(key_noise, x_data.shape)
+
+            xt, velocity_target = self.conditional_ot(t, x_noise, x_data)
         elif isinstance(self.cfg.model.conditional_flow, cs.MinibatchOTConditionalOT):
+            key, key_time = jax.random.split(key)
+            t = jax.random.uniform(key_time, shape=(x_data.shape[0], 1, 1))
+
+            key, key_noise = jax.random.split(key)
+            x_noise = jax.random.normal(key_noise, x_data.shape)
+
             key, key_plan = jax.random.split(key)
-            x_noise, x_data = optimal_transport.OTPlanSamplerJax.sample_plan(
-                key_plan,
-                x_noise, x_data,
-                reg=self.cfg.model.conditional_flow.sinkhorn_regularization,
-                replace=self.cfg.model.conditional_flow.sample_with_replacement,
-            )
-            xt = (1 - t) * x_noise + t * x_data
+            xt, velocity_target = self.minimatch_ot_conditional_ot(key_plan, t, x_noise, x_data)
+        elif isinstance(self.cfg.model.conditional_flow, cs.ConditionalSDE):
+            key, key_time = jax.random.split(key)
+            u0 = jax.random.uniform(key_time)
+            u = jnp.remainder(u0 + jnp.linspace(0, 1, x_data.shape[0]), 1)
+            t = u * (self.diffusion.tmax - self.diffusion.tmin) + self.diffusion.tmin
+            t = t[:, None, None]
+            # key, key_time = jax.random.split(key)
+            # t = jax.random.uniform(key_time, shape=(x_data.shape[0], 1, 1))
+
+            key, key_noise = jax.random.split(key)
+            x_noise = jax.random.normal(key_noise, x_data.shape)
+
+            # weighting = self.diffusion.sigma(1 - t)**2
+            if isinstance(self.cfg.model.conditional_flow.sde_diffusion, cs.SDEVarianceExploding):
+                xt, velocity_target = self.variance_exploding_conditional(t, x_noise, x_data)
+            else:
+                raise ValueError(f'Unknown SDE diffusion: {self.cfg.model.conditional_flow.sde_diffusion}')
         else:
             raise ValueError(f'Unknown conditional flow: {self.cfg.model.conditional_flow}')
 
         velocity_pred = self.velocity(xt, t.squeeze((1, 2)), cond, params, train=True)
-        velocity_target = x_data - x_noise
         return ((velocity_pred - velocity_target)**2).mean()
 
     @functools.partial(jax.jit, static_argnames=['self'])
