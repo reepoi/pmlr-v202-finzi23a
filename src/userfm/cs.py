@@ -372,6 +372,11 @@ class ModelFlowMatching(Model):
     ode_time_steps: int = field(default=1000, metadata=dict(sa=ColumnRequired(sa.Integer)))
 
 
+class CkptMonitor(str, enum.Enum):
+    TRAIN_LOSS_EMA = 'train_loss_ema'
+    VAL_RELATIVE_ERROR_EMA = 'val_relative_error'
+
+
 class Config(CfgWithTable):
     __tablename__ = __qualname__
     __table_args__ = tuple()
@@ -401,6 +406,8 @@ class Config(CfgWithTable):
     fit: bool = field(default=True, metadata=dict(sa=ColumnRequired(sa.Boolean)))
     predict: bool = field(default=False, metadata=dict(sa=ColumnRequired(sa.Boolean)))
     check_val_every_n_epoch: int = field(default=100, metadata=dict(sa=ColumnRequired(sa.Integer)))
+    use_ckpt_monitor: bool = field(default=True, metadata=dict(sa=ColumnRequired(sa.Boolean)))
+    ckpt_monitor: CkptMonitor = field(default=CkptMonitor.VAL_RELATIVE_ERROR_EMA, metadata=dict(sa=ColumnRequired(sa.Enum(CkptMonitor))))
 
     model_id: int = field(init=False, repr=False, metadata=dict(
         sa=sa.Column(Model.__name__, sa.ForeignKey(f'{Model.__name__}.id'), nullable=False),

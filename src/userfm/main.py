@@ -109,6 +109,8 @@ def main(cfg):
 
         logger = pl.loggers.TensorBoardLogger(cfg.run_dir, name='', version='tb_logs')
 
+        if cfg.use_ckpt_monitor and cfg.dataset.time_step_count_conditioning > 0 and cfg.ckpt_monitor != cs.CkptMonitor.VAL_RELATIVE_ERROR_EMA:
+            log.warn(f'{cfg.dataset.time_step_count_conditioning=} > 0, but {cfg.ckpt_monitor=}, not {cs.CkptMonitor.VAL_RELATIVE_ERROR_EMA}.')
         pl_trainer = pl.Trainer(
             max_epochs=cfg.model.architecture.epochs,
             logger=logger,
@@ -118,7 +120,7 @@ def main(cfg):
                     dirpath=cfg.run_dir,
                     filename='{epoch}',
                     save_top_k=1,
-                    monitor='val_relative_error' if cfg.dataset.time_step_count_conditioning > 0 else 'train_loss_ema',
+                    monitor=cfg.ckpt_monitor if cfg.use_ckpt_monitor else None,
                     save_last='link',
                     save_on_train_epoch_end=False,
                     enable_version_counter=False,
