@@ -110,7 +110,7 @@ class JaxLightning(pl.LightningModule):
     def predict_step(self):
         pass
 
-    def sample(self, key, tmax, cond, x_shape, params=None, keep_path=False):
+    def sample(self, key, tmax, cond, x_shape, params=None, keep_path=False, use_score=False):
         if params is None:
             params = self.params_ema
 
@@ -121,10 +121,26 @@ class JaxLightning(pl.LightningModule):
 
         if isinstance(self.cfg.model.conditional_flow, cs.ConditionalSDE):
             if isinstance(self.cfg.model.conditional_flow.sde_diffusion, cs.SDEVarianceExploding):
-                return heun_sample_diffusion(key, self.diffusion, tmax, velocity, x_shape=x_shape, nsteps=self.cfg.model.ode_time_steps, keep_path=keep_path)
+                if use_score:
+                    def score(x, t):
+                        if not hasattr(t, 'shape') or not t.shape:
+                            t = jnp.ones((x_shape[0], 1, 1)) * t
+                        # sde_sample integrates from 1 to 0, so
+                        # 1. drop the negative sign
+                        # 2. pass the reversed time to the flow matching model
+                        return 2 / self.diffusion.g2(t) * self.velocity(x, 1 - t, cond, params)
+
+                    return samplers.sde_sample(self.diffusion, score, key, x_shape, nsteps=self.cfg.model.ode_time_steps, traj=keep_path)
+                else:
+                    return heun_sample_diffusion(key, self.diffusion, tmax, velocity, x_shape=x_shape, nsteps=self.cfg.model.ode_time_steps, keep_path=keep_path)
             else:
                 raise ValueError(f'Unknown SDE diffusion: {self.cfg.model.conditional_flow.sde_diffusion}')
         else:
+            if use_score:
+                raise ValueError(
+                    f'Writing the score function in terms of the flow matching vector field is only supported when cfg.model.conditional_flow is {cs.ConditionalSDE.__name__}, not {type(self.cfg.model.conditional_flow)}.'
+                    'Please set use_score=False.'
+                )
             return heun_sample(key, tmax, velocity, x_shape=x_shape, nsteps=self.cfg.model.ode_time_steps, keep_path=keep_path)
 
     @functools.partial(jax.jit, static_argnames=['self', 'train'])
