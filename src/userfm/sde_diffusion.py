@@ -197,12 +197,12 @@ class Diffusion(abc.ABC):
 
     def noise_score(self, xt, x0, t):
         r"""Actually the score times the cov matrix. `\Sigma\nabla\logp(xt)`."""
-        s, sig = utils.unsqueeze_like(x0, self.scale(t), self.sigma(t))
+        s, sig = self.scale(t), self.sigma(t)
         return -(xt - s * x0) / sig**2
 
     def noise_input(self, x, t, key):
         """Apply the noise at scale sigma(t) and with covariance to the input."""
-        s, sig = utils.unsqueeze_like(x, self.scale(t), self.sigma(t))
+        s, sig = self.scale(t), self.sigma(t)
         return s * x + sig * self.noise(key, x.shape)
 
     def noise(self, key, shape):

@@ -15,18 +15,18 @@ from userfm import cs, optimal_transport, sde_diffusion, utils
 log = logging.getLogger(__file__)
 
 
-def heun_sample(key, tmax, velocity, x_shape, nsteps=1000, traj=False):
+def heun_sample(key, tmax, velocity, x_shape, nsteps=1000, keep_path=False):
     x_noise = jax.random.normal(key, x_shape)
     timesteps = (.5 + jnp.arange(nsteps)) / nsteps
     x0, xs = samplers.heun_integrate(velocity, x_noise, timesteps)
-    return xs if traj else x0
+    return xs if keep_path else x0
 
 
-def heun_sample_diffusion(key, diffusion, tmax, velocity, x_shape, nsteps=1000, traj=False):
+def heun_sample_diffusion(key, diffusion, tmax, velocity, x_shape, nsteps=1000, keep_path=False):
     x_noise = jax.random.normal(key, x_shape) * diffusion.sigma(tmax)
     timesteps = (.5 + jnp.arange(nsteps)) / nsteps
     x0, xs = samplers.heun_integrate(velocity, x_noise, timesteps)
-    return xs if traj else x0
+    return xs if keep_path else x0
 
 
 class JaxLightning(pl.LightningModule):
@@ -102,24 +102,30 @@ class JaxLightning(pl.LightningModule):
                 val_relative_error=torch.tensor(0.),
             )
         cond = self.cond_fn(batch)
-        def velocity(x, t):
-            if not hasattr(t, 'shape') or not t.shape:
-                t = jnp.ones((x.shape[0], 1, 1)) * t
-            # if isinstance(self.cfg.model.conditional_flow, cs.ConditionalSDE):
-            #     if isinstance(self.cfg.model.conditional_flow.sde_diffusion, cs.SDEVarianceExploding):
-            #         return -self.velocity(x, t, cond, self.params_ema)
-            #     else:
-            #         raise ValueError(f'Unknown SDE diffusion: {self.cfg.model.conditional_flow.sde_diffusion}')
-            # else:
-            return self.velocity(x, t, cond, self.params_ema)
-
-        samples = heun_sample(key_val, 1., velocity, x_shape=batch.shape, nsteps=self.cfg.model.ode_time_steps)
+        samples = self.sample(key_val, 1., cond, batch.shape, params=self.params_ema)
         return dict(
             val_relative_error=torch.tensor(einops.reduce(utils.relative_error(batch, samples), 'b t ->', 'mean').item()),
         )
 
     def predict_step(self):
         pass
+
+    def sample(self, key, tmax, cond, x_shape, params=None, keep_path=False):
+        if params is None:
+            params = self.params_ema
+
+        def velocity(x, t):
+            if not hasattr(t, 'shape') or not t.shape:
+                t = jnp.ones((x_shape[0], 1, 1)) * t
+            return self.velocity(x, t, cond, params)
+
+        if isinstance(self.cfg.model.conditional_flow, cs.ConditionalSDE):
+            if isinstance(self.cfg.model.conditional_flow.sde_diffusion, cs.SDEVarianceExploding):
+                return heun_sample_diffusion(key, self.diffusion, tmax, velocity, x_shape=x_shape, nsteps=self.cfg.model.ode_time_steps, keep_path=keep_path)
+            else:
+                raise ValueError(f'Unknown SDE diffusion: {self.cfg.model.conditional_flow.sde_diffusion}')
+        else:
+            return heun_sample(key, tmax, velocity, x_shape=x_shape, nsteps=self.cfg.model.ode_time_steps, keep_path=keep_path)
 
     @functools.partial(jax.jit, static_argnames=['self', 'train'])
     def velocity(self, x, t, cond, params, train=False):

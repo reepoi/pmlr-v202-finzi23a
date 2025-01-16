@@ -87,12 +87,7 @@ class JaxLightning(pl.LightningModule):
                 val_relative_error=torch.tensor(0.),
             )
         cond = self.cond_fn(batch)
-        def score(x, t):
-            if not hasattr(t, "shape") or not t.shape:
-                t = jnp.ones(x.shape[0]) * t
-            return self.score(x, t, cond, self.params_ema)
-
-        samples = samplers.sde_sample(self.diffusion, score, key_val, x_shape=batch.shape, nsteps=self.cfg.model.sde_time_steps)
+        samples = self.sample(key_val, 1., cond, x_shape=batch.shape, params=self.params_ema)
         return dict(
             val_relative_error=torch.tensor(einops.reduce(utils.relative_error(batch, samples), 'b t ->', 'mean').item()),
         )
@@ -100,15 +95,26 @@ class JaxLightning(pl.LightningModule):
     def predict_step(self):
         pass
 
+    def sample(self, key, tmax, cond, x_shape, params=None, keep_path=False):
+        if params is None:
+            params = self.params_ema
+
+        def score(x, t):
+            if not hasattr(t, 'shape') or not t.shape:
+                t = jnp.ones((x_shape[0], 1, 1)) * t
+            return self.score(x, t, cond, params)
+
+        return samplers.sde_sample(self.diffusion, score, key, x_shape, nsteps=self.cfg.model.sde_time_steps, traj=keep_path)
+
     @functools.partial(jax.jit, static_argnames=['self', 'train'])
     def score(self, x, t, cond, params, train=False):
         """Score function with appropriate input and output scaling."""
         # scaling is equivalent to that in Karras et al. https://arxiv.org/abs/2206.00364
-        sigma, scale = utils.unsqueeze_like(x, self.diffusion.sigma(t), self.diffusion.scale(t))
+        sigma, scale = self.diffusion.sigma(t), self.diffusion.scale(t)
         # Taos: Karras et al. $c_in$ and $s(t)$ of EDM.
         input_scale = 1 / jnp.sqrt(sigma**2 + (scale * self.train_data_std) ** 2)
         cond = cond / self.train_data_std if cond is not None else None
-        out = self.model.apply(params, x=x * input_scale, t=t, train=train, cond=cond)
+        out = self.model.apply(params, x=x * input_scale, t=t.squeeze((1, 2)), train=train, cond=cond)
         # Taos: Karras et al. the demonimator of $c_out$ of EDM; where is the numerator?
         return out / jnp.sqrt(sigma**2 + scale**2 * self.train_data_std**2)
 
@@ -121,13 +127,14 @@ class JaxLightning(pl.LightningModule):
         u0 = jax.random.uniform(key_time)
         u = jnp.remainder(u0 + jnp.linspace(0, 1, x_data.shape[0]), 1)
         t = u * (self.diffusion.tmax - self.diffusion.tmin) + self.diffusion.tmin
+        t = t[:, None, None]
 
         key, key_noise = jax.random.split(key)
         xt = self.diffusion.noise_input(x_data, t, key_noise)
         target_score = self.diffusion.noise_score(xt, x_data, t)
         # weighting from Yang Song's https://arxiv.org/abs/2011.13456
         # Taos: this appears to be using the weighting from Eqn.(1) used for discrete noise levels.
-        weighting = utils.unsqueeze_like(x_data, self.diffusion.sigma(t)**2)
+        weighting = self.diffusion.sigma(t)**2
         error = self.score(xt, t, cond, params, train=True) - target_score
         return jnp.mean((self.diffusion.covsqrt.inverse(error)**2) * weighting)
 
