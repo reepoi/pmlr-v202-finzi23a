@@ -125,10 +125,7 @@ class JaxLightning(pl.LightningModule):
                     def score(x, t):
                         if not hasattr(t, 'shape') or not t.shape:
                             t = jnp.ones((x_shape[0], 1, 1)) * t
-                        # sde_sample integrates from 1 to 0, so
-                        # 1. drop the negative sign
-                        # 2. pass the reversed time to the flow matching model
-                        return 2 / self.diffusion.g2(t) * self.velocity(x, 1 - t, cond, params)
+                        return self.score(x, t, cond, params)
 
                     return samplers.sde_sample(self.diffusion, score, key, x_shape, nsteps=self.cfg.model.ode_time_steps, traj=keep_path)
                 else:
@@ -142,6 +139,13 @@ class JaxLightning(pl.LightningModule):
                     'Please set use_score=False.'
                 )
             return heun_sample(key, tmax, velocity, x_shape=x_shape, nsteps=self.cfg.model.ode_time_steps, keep_path=keep_path)
+
+    @functools.partial(jax.jit, static_argnames=['self'])
+    def score(self, x, t, cond, params):
+        # sde_sample integrates from 1 to 0, so
+        # 1. drop the negative sign
+        # 2. pass the reversed time to the flow matching model
+        return 2 / self.diffusion.g2(t) * self.velocity(x, 1 - t, cond, params)
 
     @functools.partial(jax.jit, static_argnames=['self', 'train'])
     def velocity(self, x, t, cond, params, train=False):

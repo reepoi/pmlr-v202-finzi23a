@@ -309,16 +309,18 @@ def event_scores(diffusion,
   """Model scores ∇log p(xₜ|E) conditioned on inequality constraint E=[C(x)>0]."""
 
   def xhat(xt, t):
-    tt = unsqueeze_like(xt, t)
-    score_xhat = (xt +
-                  diffusion.sigma(tt)**2 * scorefn(xt, t)) / diffusion.scale(tt)
+    # Taos: Tweedie's formula
+    score_xhat = (
+        xt +
+        diffusion.sigma(t)**2 * scorefn(xt, t)
+    ) / diffusion.scale(t)
     return score_xhat
 
   def conditioned_scores(xt, t):
     b, _, c = xt.shape  # pylint: disable=invalid-name
     unobserved_score = scorefn(xt, t).reshape(b, -1, c)
     if not hasattr(t, 'shape') or not t.shape:
-      array_t = t * jnp.ones(b)
+      array_t = t * jnp.ones((b, 1, 1))
     else:
       array_t = t
 
@@ -326,7 +328,8 @@ def event_scores(diffusion,
       xh = xhat(xt, array_t)
       C, DC = vmap(jax.value_and_grad(constraint))(xh)  # pylint: disable=invalid-name
       CoXhat = lambda x, t: constraint(xhat(x[None], t)[0])  # pylint: disable=invalid-name
-      SigmaDC = vmap(jax.grad(CoXhat))(xt, array_t)  # pylint: disable=invalid-name
+      SigmaDC = vmap(jax.grad(CoXhat))(xt, array_t[:, None])  # pylint: disable=invalid-name
+      # Taos: What should SigmaDC's shape be?
       # NOTE: will not work with img inputs
       std = ((DC * SigmaDC).sum((-1, -2)) * diffusion.scale(t))
       std = jnp.sqrt(jnp.abs(std) + reg) * (
