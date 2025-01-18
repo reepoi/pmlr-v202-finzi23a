@@ -345,6 +345,8 @@ class ConditionalSDE(ConditionalFlow):
     ))
     sde_diffusion: SDEDiffusion = field(default_factory=SDEVarianceExploding, metadata=dict(sa=orm.relationship(SDEDiffusion.__name__, foreign_keys=[sde_diffusion_id.metadata['sa']])))
 
+    match_diffusion_weightings: bool = field(default=False, metadata=dict(sa=ColumnRequired(sa.Boolean)))
+
 
 class ModelFlowMatching(Model):
     __tablename__ = __qualname__

@@ -149,22 +149,25 @@ class JaxLightning(pl.LightningModule):
 
     @functools.partial(jax.jit, static_argnames=['self', 'train'])
     def velocity(self, x, t, cond, params, train=False):
-        # if isinstance(self.cfg.model.conditional_flow, cs.ConditionalSDE):
-        #     if isinstance(self.cfg.model.conditional_flow.sde_diffusion, cs.SDEVarianceExploding):
-        #         # scaling is equivalent to that in Karras et al. https://arxiv.org/abs/2206.00364
-        #         sigma = self.diffusion.sigma(1 - t)
-        #         # Taos: Karras et al. $c_in$ and $s(t)$ of EDM.
-        #         input_scale = 1 / jnp.sqrt(sigma**2 + self.train_data_std**2)
-        #         cond = cond / self.train_data_std if cond is not None else None
-        #         out = self.model.apply(params, x=x * input_scale, t=t.squeeze((1, 2)), train=train, cond=cond)
-        #         # Taos: Karras et al. the demonimator of $c_out$ of EDM; where is the numerator?
-        #         return out / jnp.sqrt(sigma**2 + self.train_data_std**2)
-        #         # Taos: Add the numerator
-        #         return out * sigma * self.train_data_std / jnp.sqrt(sigma**2 + self.train_data_std**2)
-        #     else:
-        #         raise ValueError(f'Unknown SDE diffusion: {self.cfg.model.conditional_flow.sde_diffusion}')
-        # else:
-        return self.model.apply(params, x=x, t=t.squeeze((1, 2)), train=train, cond=cond)
+        if isinstance(self.cfg.model.conditional_flow, cs.ConditionalSDE):
+            if self.cfg.model.conditional_flow.match_diffusion_weightings:
+                if isinstance(self.cfg.model.conditional_flow.sde_diffusion, cs.SDEVarianceExploding):
+                    # scaling is equivalent to that in Karras et al. https://arxiv.org/abs/2206.00364
+                    sigma = self.diffusion.sigma(1 - t)
+                    # Taos: Karras et al. $c_in$ and $s(t)$ of EDM.
+                    input_scale = 1 / jnp.sqrt(sigma**2 + self.train_data_std**2)
+                    cond = cond / self.train_data_std if cond is not None else None
+                    out = self.model.apply(params, x=x * input_scale, t=t.squeeze((1, 2)), train=train, cond=cond)
+                    # Taos: Karras et al. the demonimator of $c_out$ of EDM; where is the numerator?
+                    return out / jnp.sqrt(sigma**2 + self.train_data_std**2)
+                    # Taos: Add the numerator
+                    return out * sigma * self.train_data_std / jnp.sqrt(sigma**2 + self.train_data_std**2)
+                else:
+                    raise ValueError(f'Unknown SDE diffusion: {self.cfg.model.conditional_flow.sde_diffusion}')
+            else:
+                return self.model.apply(params, x=x, t=t.squeeze((1, 2)), train=train, cond=cond)
+        else:
+            return self.model.apply(params, x=x, t=t.squeeze((1, 2)), train=train, cond=cond)
 
     @functools.partial(jax.jit, static_argnames=['self'])
     def conditional_ot(self, t, x_noise, x_data):
@@ -206,7 +209,7 @@ class JaxLightning(pl.LightningModule):
         # xt = x_data + sigma * x_noise
         # minus_dsigma = jax.vmap(self.diffusion.sigma)((1 - t).squeeze((1, 2)))[:, None, None]
         # velocity_target = minus_dsigma / sigma * (xt - x_data)
-        return xt, velocity_target
+        return xt, velocity_target, minus_dsigma
 
     @functools.partial(jax.jit, static_argnames=['self'])
     def loss(self, key, x_data, cond, params):
@@ -218,6 +221,7 @@ class JaxLightning(pl.LightningModule):
             x_noise = jax.random.normal(key_noise, x_data.shape)
 
             xt, velocity_target = self.conditional_ot(t, x_noise, x_data)
+            weighting = 1.
         elif isinstance(self.cfg.model.conditional_flow, cs.MinibatchOTConditionalOT):
             key, key_time = jax.random.split(key)
             t = jax.random.uniform(key_time, shape=(x_data.shape[0], 1, 1))
@@ -227,30 +231,37 @@ class JaxLightning(pl.LightningModule):
 
             key, key_plan = jax.random.split(key)
             xt, velocity_target = self.minimatch_ot_conditional_ot(key_plan, t, x_noise, x_data)
+            weighting = 1.
         elif isinstance(self.cfg.model.conditional_flow, cs.ConditionalSDE):
-            # key, key_time = jax.random.split(key)
-            # u0 = jax.random.uniform(key_time)
-            # u = jnp.remainder(u0 + jnp.linspace(0, 1, x_data.shape[0]), 1)
-            # t = u * (self.diffusion.tmax - self.diffusion.tmin) + self.diffusion.tmin
-            # t = t[:, None, None]
-            key, key_time = jax.random.split(key)
-            t = jax.random.uniform(key_time, shape=(x_data.shape[0], 1, 1))
-            # is t min needed?
+            if self.cfg.model.conditional_flow.match_diffusion_weightings:
+                key, key_time = jax.random.split(key)
+                u0 = jax.random.uniform(key_time)
+                u = jnp.remainder(u0 + jnp.linspace(0, 1, x_data.shape[0]), 1)
+                t = u * (self.diffusion.tmax - self.diffusion.tmin) + self.diffusion.tmin
+                t = t[:, None, None]
+            else:
+                key, key_time = jax.random.split(key)
+                t = jax.random.uniform(key_time, shape=(x_data.shape[0], 1, 1))
+                # is t min needed?
 
             key, key_noise = jax.random.split(key)
             x_noise = jax.random.normal(key_noise, x_data.shape)
 
-            # weighting = self.diffusion.sigma(1 - t)**2
             if isinstance(self.cfg.model.conditional_flow.sde_diffusion, cs.SDEVarianceExploding):
-                xt, velocity_target = self.variance_exploding_conditional(t, x_noise, x_data)
+                xt, velocity_target, minus_dsigma = self.variance_exploding_conditional(t, x_noise, x_data)
             else:
                 raise ValueError(f'Unknown SDE diffusion: {self.cfg.model.conditional_flow.sde_diffusion}')
+            if self.cfg.model.conditional_flow.match_diffusion_weightings:
+                # weighting = self.diffusion.sigma(1 - t)**2
+                weighting = 1/minus_dsigma**2
+            else:
+                weighting = 1/minus_dsigma**2
         else:
             raise ValueError(f'Unknown conditional flow: {self.cfg.model.conditional_flow}')
 
         velocity_pred = self.velocity(xt, t, cond, params, train=True)
-        return ((velocity_pred - velocity_target)**2).mean()
-        # return ((velocity_pred - velocity_target)**2 / weighting).mean()
+        # return ((velocity_pred - velocity_target)**2).mean()
+        return ((velocity_pred - velocity_target)**2 * weighting).mean()
 
     @functools.partial(jax.jit, static_argnames=['self'])
     def step(self, key, batch, cond, params, params_ema, opt_state):

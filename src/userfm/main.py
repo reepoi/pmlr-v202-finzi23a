@@ -61,6 +61,7 @@ def main(cfg):
         cfg = cs.instantiate_and_insert_config(db, OmegaConf.to_container(cfg, resolve=True))
         db.commit()
         pprint.pp(cfg)
+        log.info('Command: %s', ' '.join(sys.argv))
         log.info(f'Outputs will be saved to: {cfg.run_dir}')
 
         # Hide GPUs from Tensorflow to prevent it from reserving memory,
@@ -148,7 +149,7 @@ def get_run_dir(hydra_init=utils.HYDRA_INIT, commit=True):
         cs.create_all(engine)
         with cs.orm.Session(engine, expire_on_commit=False) as db:
             cfg = cs.instantiate_and_insert_config(db, OmegaConf.to_container(cfg, resolve=True))
-            if commit:
+            if commit and '-c' not in sys.argv:
                 db.commit()
             return first_override, str(cfg.run_dir)
 
