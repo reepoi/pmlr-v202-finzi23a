@@ -92,7 +92,8 @@ class ODEDataset(object):
 
   def __getitem__(self,
                   i):
-    return (self.Zs[i, 0], self.T), self.Zs[i]  # pytype: disable=bad-return-type  # jax-ndarray
+    # return (self.Zs[i, 0], self.T), self.Zs[i]  # pytype: disable=bad-return-type  # jax-ndarray
+    return self.Zs[i]  # pytype: disable=bad-return-type  # jax-ndarray
 
   def integrate(self,
                 z0s,
@@ -379,13 +380,16 @@ class NPendulum(HamiltonianDataset):
 def get_dataset(cfg, key=None, rng_seed=None):
   if key is None:
     key = jax.random.key(rng_seed)
+  N = cfg.batch_size * (
+    cfg.batch_count_train + cfg.batch_count_val + cfg.batch_count_test
+  )
   if isinstance(cfg, cs.DatasetLorenz):
-    return LorenzDataset(N=cfg.trajectory_count, key=key)
+    return LorenzDataset(N=N, key=key)
   elif isinstance(cfg, cs.DatasetFitzHughNagumo):
-    return FitzHughDataset(N=cfg.trajectory_count, key=key)
+    return FitzHughDataset(N=N, key=key)
   elif isinstance(cfg, cs.DatasetSimpleHarmonicOscillator):
-      return SHO(N=cfg.trajectory_count, integration_time=6, key=key)
+      return SHO(N=N, integration_time=6, key=key)
   elif isinstance(cfg, cs.DatasetPendulum):
-    return NPendulum(N=cfg.trajectory_count, key=key)
+    return NPendulum(N=N, key=key)
   else:
     raise ValueError(f'Unknown dataset: {cfg}')
