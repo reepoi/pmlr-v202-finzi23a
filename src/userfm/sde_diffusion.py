@@ -223,6 +223,14 @@ class VarianceExploding(Diffusion):
         # This appears to fix the discontinuity at 0 of Eqn.(31).
         return self.cfg.sigma_min * jnp.sqrt((self.cfg.sigma_max / self.cfg.sigma_min)**(2 * t) - 1)
 
+    def dsigma(self, t):
+        return (
+            self.cfg.sigma_min
+            * jnp.log(self.cfg.sigma_max / self.cfg.sigma_min)
+            * (self.cfg.sigma_max / self.cfg.sigma_min)**(2 * t)
+            / jnp.sqrt((self.cfg.sigma_max / self.cfg.sigma_min)**(2 * t) - 1)
+        )
+
     def g2(self, t):
         return (
             2 * self.cfg.sigma_min**2

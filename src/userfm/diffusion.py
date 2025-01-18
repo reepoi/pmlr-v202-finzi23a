@@ -104,7 +104,7 @@ class JaxLightning(pl.LightningModule):
                 t = jnp.ones((x_shape[0], 1, 1)) * t
             return self.score(x, t, cond, params)
 
-        return samplers.sde_sample(self.diffusion, score, key, x_shape, nsteps=self.cfg.model.sde_time_steps, traj=keep_path)
+        return samplers.sde_sample(self.diffusion, score, key, x_shape, nsteps=self.cfg.model.time_step_count_sampling, traj=keep_path)
 
     @functools.partial(jax.jit, static_argnames=['self', 'train'])
     def score(self, x, t, cond, params, train=False):

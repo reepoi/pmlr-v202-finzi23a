@@ -73,6 +73,12 @@ def main(cfg):
 
         key = jax.random.key(cfg.rng_seed)
         key, key_dataset = jax.random.split(key)
+        if isinstance(cfg.dataset, cs.DatasetGaussianMixture) and cfg.use_ckpt_monitor:
+            log.warn(
+                f'cfg.dataset=GaussianMixture and {cfg.use_ckpt_monitor=}.'
+                'The monitored value may not improve with this dataset.'
+                'Consider setting cfg.use_ckpt_monitor=false.'
+            )
         ds = datasets.get_dataset(cfg.dataset, key=key_dataset)
         splits = datasets.split_dataset(cfg.dataset, ds)
         if splits['train'].shape[1] != 60:
@@ -138,12 +144,12 @@ def main(cfg):
 
 def get_run_dir(hydra_init=utils.HYDRA_INIT, commit=True):
     with hydra.initialize(version_base=hydra_init['version_base'], config_path=hydra_init['config_path']):
-        first_override = None
+        last_override = None
         overrides = []
         for i, a in enumerate(sys.argv):
             if '=' in a:
                 overrides.append(a)
-                first_override = i
+                last_override = i
         cfg = hydra.compose(hydra_init['config_name'], overrides=overrides)
         engine = cs.get_engine()
         cs.create_all(engine)
@@ -151,14 +157,15 @@ def get_run_dir(hydra_init=utils.HYDRA_INIT, commit=True):
             cfg = cs.instantiate_and_insert_config(db, OmegaConf.to_container(cfg, resolve=True))
             if commit and '-c' not in sys.argv:
                 db.commit()
-            return first_override, str(cfg.run_dir)
+                cfg.run_dir.mkdir(exist_ok=True)
+            return last_override, str(cfg.run_dir)
 
 
 if __name__ == '__main__':
-    first_override, run_dir = get_run_dir()
+    last_override, run_dir = get_run_dir()
     run_dir_override = f'hydra.run.dir={run_dir}'
-    if first_override is None:
+    if last_override is None:
         sys.argv.append(run_dir_override)
     else:
-        sys.argv.insert(first_override, run_dir_override)
+        sys.argv.insert(last_override + 1, run_dir_override)
     main()

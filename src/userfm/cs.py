@@ -252,19 +252,23 @@ class ModelDiffusion(Model):
         polymorphic_identity=__tablename__,
     )
     _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
+    defaults: typing.List[typing.Any] = field(repr=False, default_factory=lambda: [
+        dict(sde_diffusion=omegaconf.MISSING),
+        '_self_'
+    ])
 
     id: int = field(init=False, metadata=dict(
         sa=sa.Column(sa.ForeignKey(f'{Model.__name__}.id'), primary_key=True),
         omegaconf_ignore=True,
     ))
 
-    sde_time_steps: int = field(default=1000, metadata=dict(sa=ColumnRequired(sa.Integer)))
-
     sde_diffusion_id: int = field(init=False, repr=False, metadata=dict(
         sa=sa.Column(SDEDiffusion.__name__, sa.ForeignKey(f'{SDEDiffusion.__name__}.id'), nullable=False),
         omegaconf_ignore=True,
     ))
-    sde_diffusion: SDEDiffusion = field(default_factory=SDEVarianceExploding, metadata=dict(sa=orm.relationship(SDEDiffusion.__name__, foreign_keys=[sde_diffusion_id.metadata['sa']])))
+    sde_diffusion: SDEDiffusion = field(default=omegaconf.MISSING, metadata=dict(sa=orm.relationship(SDEDiffusion.__name__, foreign_keys=[sde_diffusion_id.metadata['sa']])))
+
+    time_step_count_sampling: int = field(default=1000, metadata=dict(sa=ColumnRequired(sa.Integer)))
 
 
 class ConditionalFlow(CfgWithTable):
@@ -333,6 +337,10 @@ class ConditionalSDE(ConditionalFlow):
         polymorphic_identity=__tablename__,
     )
     _target_: str = field(default=f'{MODULE_NAME}.{__qualname__}', repr=False)
+    defaults: typing.List[typing.Any] = field(repr=False, default_factory=lambda: [
+        dict(sde_diffusion=omegaconf.MISSING),
+        '_self_'
+    ])
 
     id: int = field(init=False, metadata=dict(
         sa=sa.Column(sa.ForeignKey(f'{ConditionalFlow.__name__}.id'), primary_key=True),
@@ -343,9 +351,9 @@ class ConditionalSDE(ConditionalFlow):
         sa=sa.Column(SDEDiffusion.__name__, sa.ForeignKey(f'{SDEDiffusion.__name__}.id'), nullable=False),
         omegaconf_ignore=True,
     ))
-    sde_diffusion: SDEDiffusion = field(default_factory=SDEVarianceExploding, metadata=dict(sa=orm.relationship(SDEDiffusion.__name__, foreign_keys=[sde_diffusion_id.metadata['sa']])))
+    sde_diffusion: SDEDiffusion = field(default=omegaconf.MISSING, metadata=dict(sa=orm.relationship(SDEDiffusion.__name__, foreign_keys=[sde_diffusion_id.metadata['sa']])))
 
-    match_diffusion_weightings: bool = field(default=False, metadata=dict(sa=ColumnRequired(sa.Boolean)))
+    finzi_karras_weighting: bool = field(default=True, metadata=dict(sa=ColumnRequired(sa.Boolean)))
 
 
 class ModelFlowMatching(Model):
@@ -371,7 +379,9 @@ class ModelFlowMatching(Model):
     ))
     conditional_flow: ConditionalFlow = field(default=omegaconf.MISSING, metadata=dict(sa=orm.relationship(ConditionalFlow.__name__, foreign_keys=[conditional_flow_id.metadata['sa']])))
 
-    ode_time_steps: int = field(default=1000, metadata=dict(sa=ColumnRequired(sa.Integer)))
+    time_samples_uniformly_spaced: bool = field(default=False, metadata=dict(sa=ColumnRequired(sa.Boolean)))
+
+    time_step_count_sampling: int = field(default=1000, metadata=dict(sa=ColumnRequired(sa.Integer)))
 
 
 class CkptMonitor(str, enum.Enum):
@@ -425,9 +435,7 @@ class Config(CfgWithTable):
 
     @property
     def run_dir(self):
-        path = Path(self.out_dir)/'runs'/self.alt_id
-        path.mkdir(exist_ok=True)
-        return path
+        return Path(self.out_dir)/'runs'/self.alt_id
 
 
 @sa.event.listens_for(Config, 'before_insert')
@@ -446,10 +454,12 @@ cs.store(group=Config.dataset.key, name=DatasetLorenz.__name__, node=DatasetLore
 cs.store(group=Config.dataset.key, name=DatasetFitzHughNagumo.__name__, node=DatasetFitzHughNagumo)
 cs.store(group=Config.dataset.key, name=DatasetSimpleHarmonicOscillator.__name__, node=DatasetSimpleHarmonicOscillator)
 cs.store(group=Config.model.key, name=ModelDiffusion.__name__, node=ModelDiffusion)
+cs.store(group=f'{Config.model.key}/{ModelDiffusion.sde_diffusion.key}', name=SDEVarianceExploding.__name__, node=SDEVarianceExploding)
 cs.store(group=Config.model.key, name=ModelFlowMatching.__name__, node=ModelFlowMatching)
 cs.store(group=f'{Config.model.key}/{ModelFlowMatching.conditional_flow.key}', name=ConditionalOT.__name__, node=ConditionalOT)
 cs.store(group=f'{Config.model.key}/{ModelFlowMatching.conditional_flow.key}', name=MinibatchOTConditionalOT.__name__, node=MinibatchOTConditionalOT)
 cs.store(group=f'{Config.model.key}/{ModelFlowMatching.conditional_flow.key}', name=ConditionalSDE.__name__, node=ConditionalSDE)
+cs.store(group=f'{Config.model.key}/{ModelFlowMatching.conditional_flow.key}/{ConditionalSDE.sde_diffusion.key}', name=SDEVarianceExploding.__name__, node=SDEVarianceExploding)
 cs.store(name=Config.__name__, node=Config)
 
 
