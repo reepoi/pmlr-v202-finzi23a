@@ -6,17 +6,14 @@ import sys
 import hydra
 from omegaconf import OmegaConf
 import tensorflow as tf
-import einops
 import torch
 import torch.utils.data.dataloader
-import numpy as np
 import jax
 import jax.numpy as jnp
 import lightning.pytorch as pl
-import optax
 
-from userdiffusion import samplers, unet
-from userfm import callbacks, cs, datasets, diffusion, flow_matching, sde_diffusion, utils
+from userdiffusion import unet
+from userfm import callbacks, cs, datasets, diffusion, flow_matching, utils
 
 
 log = logging.getLogger(__name__)
@@ -29,7 +26,6 @@ def log_prediction_metric(qs, times, integrate):
     """
     trajectory = qs
     trajectory_groud_truth = integrate(trajectory[0], times)
-    # Taos: todo: why does relative_error return a vector?
     return jnp.log(
         utils.relative_error(trajectory, trajectory_groud_truth)[1:len(times)//2]
     ).mean()
